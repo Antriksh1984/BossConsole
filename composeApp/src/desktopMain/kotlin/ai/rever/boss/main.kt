@@ -855,6 +855,12 @@ fun main(args: Array<String>) {
                 // App-level trigger through the app-level owner.
                 ai.rever.boss.updater.UpdateCoordinator.instance
                     .checkForUpdatesInBackground()
+                // Also refresh the shared version list (BossConsole#149's "What's New" feed
+                // reads it), so a release published while the app is running shows up without
+                // waiting for its 1-hour cache to expire.
+                ai.rever.boss.updater.UpdateCoordinator.instance
+                    .versionListManager
+                    .fetchVersions(forceRefresh = true)
             }
             start()
         }

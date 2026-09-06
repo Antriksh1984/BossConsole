@@ -32,6 +32,15 @@ expect object UpdateSettings {
      * is dismissed.
      */
     var lastDismissedVersion: String?
+
+    /**
+     * The version string of the newest release the user has seen in the Dashboard's
+     * "What's New" feed (BossConsole#149). Distinct from [lastDismissedVersion]: that one
+     * suppresses the update *prompt* for a version the user chose to skip installing; this one
+     * only tracks what has been shown, so a release the user has looked at loses its "NEW"
+     * badge whether or not they ever install it. Null when nothing has been seen yet.
+     */
+    var lastSeenReleaseVersion: String?
 }
 
 /**

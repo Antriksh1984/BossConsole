@@ -88,4 +88,54 @@ class ReleaseNotesMarkdownTest {
         val blocks = parseReleaseNotes("```\ndangling")
         assertEquals(listOf(NotesBlock.CodeBlock("dangling")), blocks)
     }
+
+    // ---- summarizeReleaseNotes (BossConsole#149) ----
+
+    @Test
+    fun `summary is the first heading, not the release title`() {
+        val blocks = parseReleaseNotes(realNotes)
+        // realNotes' first block IS a heading ("BOSS 9.2.21") - a real release's actual first
+        // heading after the title would be the first section, e.g. "Downloads" or "Highlights".
+        assertEquals("🚀 BOSS 9.2.21", summarizeReleaseNotes(blocks))
+    }
+
+    @Test
+    fun `summary prefers the first paragraph when notes open with prose`() {
+        val blocks = parseReleaseNotes("Fixed a crash on startup.\n\n- also a minor fix")
+        assertEquals("Fixed a crash on startup.", summarizeReleaseNotes(blocks))
+    }
+
+    @Test
+    fun `summary skips tables and code blocks entirely`() {
+        val blocks =
+            parseReleaseNotes(
+                """
+                | A | B |
+                |---|---|
+                | 1 | 2 |
+
+                ```
+                code
+                ```
+
+                Actual prose at last.
+                """.trimIndent(),
+            )
+        assertEquals("Actual prose at last.", summarizeReleaseNotes(blocks))
+    }
+
+    @Test
+    fun `summary is null when nothing summarizable exists`() {
+        val blocks = parseReleaseNotes("```\njust code\n```")
+        assertEquals(null, summarizeReleaseNotes(blocks))
+    }
+
+    @Test
+    fun `a long summary is truncated with an ellipsis`() {
+        val long = "x".repeat(200)
+        val blocks = parseReleaseNotes(long)
+        val summary = summarizeReleaseNotes(blocks)
+        assertTrue(summary!!.endsWith("…"))
+        assertTrue(summary.length < long.length)
+    }
 }

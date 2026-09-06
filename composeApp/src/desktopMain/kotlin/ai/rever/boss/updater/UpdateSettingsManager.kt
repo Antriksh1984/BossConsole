@@ -48,6 +48,13 @@ actual object UpdateSettings {
      */
     @Volatile
     actual var lastDismissedVersion: String? = null
+
+    /**
+     * Newest release version seen in the Dashboard's "What's New" feed.
+     * Default: null (nothing seen yet - every fetched release shows a "NEW" badge)
+     */
+    @Volatile
+    actual var lastSeenReleaseVersion: String? = null
 }
 
 /**
@@ -59,6 +66,7 @@ data class UpdateSettingsData(
     val checkIntervalHours: Long = 6,
     val includePreReleases: Boolean = false,
     val lastDismissedVersion: String? = null,
+    val lastSeenReleaseVersion: String? = null,
 )
 
 /**
@@ -99,6 +107,7 @@ actual object UpdateSettingsManager {
                 UpdateSettings.checkIntervalHours = settings.checkIntervalHours
                 UpdateSettings.includePreReleases = settings.includePreReleases
                 UpdateSettings.lastDismissedVersion = settings.lastDismissedVersion
+                UpdateSettings.lastSeenReleaseVersion = settings.lastSeenReleaseVersion
 
                 logger.debug(
                     LogCategory.SYSTEM,
@@ -130,6 +139,7 @@ actual object UpdateSettingsManager {
                         checkIntervalHours = UpdateSettings.checkIntervalHours,
                         includePreReleases = UpdateSettings.includePreReleases,
                         lastDismissedVersion = UpdateSettings.lastDismissedVersion,
+                        lastSeenReleaseVersion = UpdateSettings.lastSeenReleaseVersion,
                     )
 
                 val content = json.encodeToString(UpdateSettingsData.serializer(), settings)

@@ -100,6 +100,8 @@ fun HomeScreen(modifier: Modifier = Modifier) {
                 onSearch = actions::openSearch,
             )
 
+            WhatsNewSection()
+
             JumpBackInSection(
                 recentProjects = recentProjects,
                 windowHoldsProject = selectedProject.path.isNotEmpty(),
@@ -273,7 +275,7 @@ private fun RecentPagesSection(
  * an unordered set, which is why they wrap instead.
  */
 @Composable
-private fun CardStrip(content: @Composable () -> Unit) {
+internal fun CardStrip(content: @Composable () -> Unit) {
     Row(
         modifier =
             Modifier

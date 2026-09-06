@@ -238,6 +238,14 @@ class UpdateCoordinator internal constructor(
     internal val updateService: UpdateService
         get() = manager.updateService
 
+    /**
+     * The app-wide version list, shared by the Settings screen and the Dashboard's "What's New"
+     * feed (BossConsole#149) so the two do not each run their own fetch against the same 50-release
+     * Supabase query. Lazy, not eager: most sessions never open either surface, so there is no
+     * reason to fetch on startup.
+     */
+    val versionListManager: VersionListManager by lazy { VersionListManager(updateService) }
+
     fun downloadUpdateInBackground(updateInfo: UpdateInfo) {
         if (isShutDown) return
         manager.downloadUpdateInBackground(updateInfo)

@@ -240,6 +240,28 @@ internal fun buildInlineMarkdown(text: String): AnnotatedString =
         append(text.substring(pos))
     }
 
+/**
+ * A one-line summary for a release card (BossConsole#149): the first block with actual prose.
+ * Skips [NotesBlock.CodeBlock], [NotesBlock.Table] and [NotesBlock.ThematicBreak] - none of
+ * those reads sensibly truncated to a single line - and falls back to null (never an empty
+ * string) so a caller can fall back to its own plain-text handling exactly as [NotesBlockView]'s
+ * callers already do for a block list that failed to parse.
+ */
+internal fun summarizeReleaseNotes(blocks: List<NotesBlock>): String? =
+    blocks
+        .firstNotNullOfOrNull { block ->
+            when (block) {
+                is NotesBlock.Heading -> block.text
+                is NotesBlock.Paragraph -> block.text
+                is NotesBlock.ListItem -> block.text
+                is NotesBlock.CodeBlock, is NotesBlock.Table, NotesBlock.ThematicBreak -> null
+            }
+        }?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { text -> if (text.length > SUMMARY_MAX_CHARS) text.take(SUMMARY_MAX_CHARS).trimEnd() + "…" else text }
+
+private const val SUMMARY_MAX_CHARS = 90
+
 private fun headingFontSize(level: Int) =
     when (level) {
         1 -> 16.sp
