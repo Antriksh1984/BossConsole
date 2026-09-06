@@ -21,6 +21,24 @@ data class SecretEntry(
     val createdAt: String,
     @SerialName("updated_at")
     val updatedAt: String,
+    // The four columns `get_user_secrets`/`search_user_secrets` gained from the organisation
+    // migration (BossConsole#146). Nullable with no default reason to be strict: `org_id` is
+    // genuinely absent for a personal secret, and `is_org_owned`/`can_manage`, though the RPC
+    // computes them as plain boolean expressions today, follow the same "every projected column
+    // is optional" rule as everything else here - a later migration changing how they're derived
+    // must degrade to "unknown", never crash the whole list.
+    @SerialName("org_id")
+    val orgId: String? = null,
+    @SerialName("org_slug")
+    val orgSlug: String? = null,
+    @SerialName("is_org_owned")
+    val isOrgOwned: Boolean? = null,
+    // Absent (null) means "unknown", and callers must treat that as "cannot manage" - the same
+    // fail-closed reading the server itself uses via can_manage_secret(). Never default this to
+    // true: a client on an older build that has never seen this column must not grant an edit
+    // affordance the server may since have revoked.
+    @SerialName("can_manage")
+    val canManage: Boolean? = null,
 )
 
 /**
@@ -148,8 +166,30 @@ data class SecretEntryWithSharing(
     val isOwner: Boolean,
     @SerialName("shared_by_email")
     val sharedByEmail: String? = null,
+    // "owner" | "org" | whatever secret_shares.access_level holds (e.g. "read"/"write").
+    // "org" is the value BossConsole#146 is about: an organisation migration added a fourth
+    // UNION branch to get_user_secrets_with_shared for org-owned secrets, and every access_level
+    // consumer that only expected "owner"/"read"/"write" falls through it silently.
     @SerialName("access_level")
     val accessLevel: String,
+    // The five columns get_user_secrets_with_shared gained from the organisation migration
+    // (BossConsole#146). See SecretEntry's matching fields for why these are nullable even
+    // though the RPC computes most of them as plain (non-null) boolean expressions today.
+    @SerialName("org_id")
+    val orgId: String? = null,
+    @SerialName("org_slug")
+    val orgSlug: String? = null,
+    @SerialName("is_org_owned")
+    val isOrgOwned: Boolean? = null,
+    // Distinct from orgId/orgSlug above: this is the org a PERSONAL secret was shared TO, not
+    // the org that OWNS it - the two are mutually exclusive in the RPC's own UNION (a row is
+    // either "this secret's own org-ownership" or "shared to me via my org membership", never
+    // both), but nothing stops a future migration changing that, so they stay separate fields
+    // rather than one reused for both meanings.
+    @SerialName("shared_with_org_slug")
+    val sharedWithOrgSlug: String? = null,
+    @SerialName("can_manage")
+    val canManage: Boolean? = null,
 ) {
     /**
      * Convert to regular SecretEntry for compatibility
@@ -166,6 +206,10 @@ data class SecretEntryWithSharing(
             metadata = metadata,
             createdAt = createdAt,
             updatedAt = updatedAt,
+            orgId = orgId,
+            orgSlug = orgSlug,
+            isOrgOwned = isOrgOwned,
+            canManage = canManage,
         )
 }
 
@@ -199,6 +243,14 @@ data class SecretShareEntry(
     @SerialName("expires_at")
     val expiresAt: String? = null,
     val notes: String? = null,
+    // The two columns get_secret_shares gained from the organisation migration
+    // (BossConsole#146): who a secret was shared with when the target was an organisation
+    // rather than a user or a role. Both null for a user/role share, same as
+    // sharedWithUserId/sharedWithRoleId already are for the other two share kinds.
+    @SerialName("shared_with_org_id")
+    val sharedWithOrgId: String? = null,
+    @SerialName("shared_with_org_slug")
+    val sharedWithOrgSlug: String? = null,
 )
 
 /**

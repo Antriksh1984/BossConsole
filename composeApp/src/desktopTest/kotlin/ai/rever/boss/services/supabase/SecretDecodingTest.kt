@@ -92,6 +92,16 @@ class SecretDecodingTest {
         assertEquals("hunter2", secrets[1].password)
         assertEquals(true, secrets[0].metadata?.twofaEnabled)
         assertEquals(listOf("abc-123"), secrets[0].metadata?.recoveryCodes)
+
+        // BossConsole#146: these four columns used to decode and vanish - SecretEntry had no
+        // field to receive them. A personal secret (no org) and an org-owned one, so both the
+        // null and the populated shape are pinned, not just "it didn't throw".
+        assertNull(secrets[0].orgId)
+        assertEquals(false, secrets[0].isOrgOwned)
+        assertEquals("33333333-3333-3333-3333-333333333333", secrets[1].orgId)
+        assertEquals("acme", secrets[1].orgSlug)
+        assertEquals(true, secrets[1].isOrgOwned)
+        assertEquals(true, secrets[1].canManage)
     }
 
     @Test
@@ -127,6 +137,46 @@ class SecretDecodingTest {
         assertEquals(1, secrets.size)
         assertEquals("read", secrets[0].accessLevel)
         assertFalse(secrets[0].isOwner)
+        // BossConsole#146: five more columns that used to decode and vanish.
+        assertEquals("66666666-6666-6666-6666-666666666666", secrets[0].orgId)
+        assertEquals("acme", secrets[0].orgSlug)
+        assertEquals(true, secrets[0].isOrgOwned)
+        assertEquals("acme", secrets[0].sharedWithOrgSlug)
+        assertEquals(true, secrets[0].canManage)
+    }
+
+    @Test
+    fun `get_user_secrets_with_shared decodes access_level org - the case #146 is about`() {
+        // The fourth UNION branch the organisation migration added: a secret owned by an org
+        // the caller belongs to, where is_owner is (creator == caller) and can genuinely be
+        // false for an org admin who didn't create it. Before this model change, "org" decoded
+        // fine (it is just a string) but had nothing to distinguish it from "owner"/"read"/
+        // "write" once it reached anything that branched on the value - which is the actual bug
+        // #146 reports, not a decoding failure.
+        val payload =
+            buildJsonArray {
+                add(
+                    buildJsonObject {
+                        baseSecret("cccccccc-cccc-cccc-cccc-cccccccccccc")
+                        put("is_owner", false)
+                        put("shared_by_email", null as String?)
+                        put("access_level", "org")
+                        orgColumns("dddddddd-dddd-dddd-dddd-dddddddddddd")
+                        put("shared_with_org_slug", null as String?)
+                    },
+                )
+            }
+
+        val secrets = supabaseJson.decodeFromJsonElement<List<SecretEntryWithSharing>>(payload)
+
+        assertEquals(1, secrets.size)
+        val orgSecret = secrets[0]
+        assertEquals("org", orgSecret.accessLevel)
+        assertFalse(orgSecret.isOwner)
+        // The point of #146: an org admin who did not create this secret is not its "owner",
+        // but IS allowed to manage it - can_manage is what a UI must gate edit/delete on.
+        assertEquals(true, orgSecret.canManage)
+        assertEquals(true, orgSecret.isOrgOwned)
     }
 
     @Test
@@ -157,6 +207,11 @@ class SecretDecodingTest {
 
         assertEquals(1, shares.size)
         assertEquals("write", shares[0].accessLevel)
+        // BossConsole#146: the two columns this test's own name promises, previously decoded
+        // and discarded - ignoreUnknownKeys hid the gap rather than a missing-field exception,
+        // which is why this went unnoticed until someone read the model against the RPC.
+        assertEquals("88888888-8888-8888-8888-888888888888", shares[0].sharedWithOrgId)
+        assertEquals("acme", shares[0].sharedWithOrgSlug)
     }
 
     @Test
