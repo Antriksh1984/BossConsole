@@ -1,5 +1,6 @@
 package ai.rever.boss.components.plugin
 
+import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.plugin.PluginPersistence
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.PluginManifestReader
@@ -44,6 +45,13 @@ class StoreVersionHooks(
                 installedVersion = version,
             )
         },
+    /**
+     * The passive notice a deferred (not-hot-reloadable, BossConsole#71) install shows instead
+     * of the running instance simply picking up the new version.
+     */
+    val notifyDeferred: (displayName: String) -> Unit = { displayName ->
+        StatusMessageManager.showMessage("$displayName was updated - restart BOSS to apply it", durationMs = 5000)
+    },
 )
 
 /**
@@ -181,6 +189,33 @@ internal class StoreVersionInstaller(
                 mapOf("expected" to pluginId, "declared" to (declaredId ?: "unreadable")),
             )
             return failure("The store copy did not install as $pluginId. The store entry may be wrong.")
+        }
+
+        // This plugin owns a native OS peer bound to the classloader that created it
+        // (BossConsole#71) - force-unloading that loader to swap in the update leaves every
+        // open (and every future) surface unable to attach a view. Stage the new jar for the
+        // next restart instead of touching the running instance. The old jar is deliberately
+        // left in place too (unlike the normal path below, which lets PluginJarReconciler clean
+        // it up next launch): the still-running classloader still has it open.
+        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+            val persisted =
+                runCatching { hooks.persist(pluginId, target.absolutePath, declared.version, request.sourceUrl) }
+            if (persisted.isFailure) {
+                hooks.discardFiles(target.absolutePath)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Could not record a deferred plugin update",
+                    mapOf("pluginId" to pluginId, "error" to (persisted.exceptionOrNull()?.message ?: "unknown")),
+                )
+                return failure("Downloaded v$version but could not record it for the next restart.")
+            }
+            logger.info(
+                LogCategory.SYSTEM,
+                "Deferred a store install to the next restart - this plugin owns a native surface",
+                mapOf("pluginId" to pluginId, "version" to version),
+            )
+            hooks.notifyDeferred(declared.displayName)
+            return Result.success(declared.version)
         }
 
         // Force, because this is a deliberate replacement: the point is to drop the local build.
