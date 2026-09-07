@@ -62,35 +62,39 @@ data class SystemPluginInfo(
  * A [SystemPluginInfo.downloadOnly] runtime is not reconciled or persisted, so
  * it keeps the previous eager cleanup behavior instead.
  */
-internal suspend fun finishBackgroundSystemPluginUpdate(
-    plugin: SystemPluginInfo,
-    promotedJar: File,
-    pluginDir: File,
-    persistLoadablePlugin: (File) -> Unit,
-    persistSignature: suspend (File) -> Unit,
-    manifestIdOf: (File) -> String?,
-    onSupersededArtifactProcessed: (File, Boolean) -> Unit,
-) {
-    if (!plugin.downloadOnly) persistLoadablePlugin(promotedJar)
-    persistSignature(promotedJar)
+internal data class BackgroundSystemPluginUpdate(
+    val plugin: SystemPluginInfo,
+    val promotedJar: File,
+    val pluginDir: File,
+    val persistLoadablePlugin: (File) -> Unit,
+    val persistSignature: suspend (File) -> Unit,
+    val manifestIdOf: (File) -> String?,
+    val onSupersededArtifactProcessed: (File, Boolean) -> Unit,
+)
 
-    if (!plugin.downloadOnly) return
+internal suspend fun finishBackgroundSystemPluginUpdate(
+    update: BackgroundSystemPluginUpdate,
+) {
+    if (!update.plugin.downloadOnly) update.persistLoadablePlugin(update.promotedJar)
+    update.persistSignature(update.promotedJar)
+
+    if (!update.plugin.downloadOnly) return
 
     // Download-only runtime artifacts are neither loaded as plugins nor handled
     // by PluginJarReconciler. Keep their established single-artifact lifecycle so
     // a later in-session check cannot select an arbitrary stale version.
-    pluginDir
+    update.pluginDir
         .listFiles()
         ?.filter {
             it.name.endsWith(".jar") &&
-                it.name != promotedJar.name &&
-                manifestIdOf(it) == plugin.pluginId
+                it.name != update.promotedJar.name &&
+                update.manifestIdOf(it) == update.plugin.pluginId
         }?.forEach { oldFile ->
             val deleted = oldFile.delete()
             // A signature belongs to exactly one JAR. Do not remove it if a
             // Windows lock left the JAR in place.
             if (deleted) runCatching { PluginSignatureSidecar.delete(oldFile.absolutePath) }
-            onSupersededArtifactProcessed(oldFile, deleted)
+            update.onSupersededArtifactProcessed(oldFile, deleted)
         }
 }
 
@@ -1259,38 +1263,40 @@ object PluginStoreSetup {
                 // move, so the intermediate state is *unsigned*, which is
                 // warn-and-allow by design.
                 finishBackgroundSystemPluginUpdate(
-                    plugin = plugin,
-                    promotedJar = destFile,
-                    pluginDir = _pluginDir,
-                    persistLoadablePlugin = { promoted ->
-                        // Preserve the user's existing `enabled` choice and `sourceUrl` —
-                        // `addInstalledPlugin` does removeIf+add, so passing the defaults
-                        // would silently re-enable a user-disabled plugin and wipe sourceUrl
-                        // on every background update.
-                        val existing =
-                            PluginPersistence
-                                .getInstalledPlugins()
-                                .find { it.pluginId == plugin.pluginId }
-                        PluginPersistence.addInstalledPlugin(
-                            pluginId = plugin.pluginId,
-                            jarPath = promoted.absolutePath,
-                            enabled = existing?.enabled ?: true,
-                            sourceUrl = existing?.sourceUrl,
-                            installedVersion = tagName.removePrefix("v"),
-                        )
-                    },
-                    persistSignature = { persistStoreSignatureSidecar(it) },
-                    manifestIdOf = { readPluginManifest(it)?.pluginId },
-                    onSupersededArtifactProcessed = { oldFile, deleted ->
-                        logger.debug(
-                            LogCategory.SYSTEM,
-                            "Removed old version",
-                            mapOf(
-                                "file" to oldFile.name,
-                                "deleted" to deleted,
-                            ),
-                        )
-                    },
+                    BackgroundSystemPluginUpdate(
+                        plugin = plugin,
+                        promotedJar = destFile,
+                        pluginDir = _pluginDir,
+                        persistLoadablePlugin = { promoted ->
+                            // Preserve the user's existing `enabled` choice and `sourceUrl` —
+                            // `addInstalledPlugin` does removeIf+add, so passing the defaults
+                            // would silently re-enable a user-disabled plugin and wipe sourceUrl
+                            // on every background update.
+                            val existing =
+                                PluginPersistence
+                                    .getInstalledPlugins()
+                                    .find { it.pluginId == plugin.pluginId }
+                            PluginPersistence.addInstalledPlugin(
+                                pluginId = plugin.pluginId,
+                                jarPath = promoted.absolutePath,
+                                enabled = existing?.enabled ?: true,
+                                sourceUrl = existing?.sourceUrl,
+                                installedVersion = tagName.removePrefix("v"),
+                            )
+                        },
+                        persistSignature = { persistStoreSignatureSidecar(it) },
+                        manifestIdOf = { readPluginManifest(it)?.pluginId },
+                        onSupersededArtifactProcessed = { oldFile, deleted ->
+                            logger.debug(
+                                LogCategory.SYSTEM,
+                                "Removed old version",
+                                mapOf(
+                                    "file" to oldFile.name,
+                                    "deleted" to deleted,
+                                ),
+                            )
+                        },
+                    ),
                 )
 
                 logger.info(
