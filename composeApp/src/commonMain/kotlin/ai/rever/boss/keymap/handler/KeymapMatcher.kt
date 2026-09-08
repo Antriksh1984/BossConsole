@@ -6,6 +6,7 @@ import ai.rever.boss.keymap.model.KeymapSettings
 import ai.rever.boss.keymap.model.ShortcutContext
 import ai.rever.boss.keymap.model.canonicalKeyName
 import ai.rever.boss.keymap.model.canonicalModifiers
+import ai.rever.boss.keymap.model.keyName
 import ai.rever.boss.utils.SystemUtils
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -233,17 +234,7 @@ class KeymapMatcher(
         eventKey: Key,
         bindingKeyName: String,
     ): Boolean {
-        // Extract key name from the Key object
-        // Key.toString() format is "Key: X" where X is the key name
-        val eventKeyString = eventKey.toString()
-        val eventKeyName =
-            if (eventKeyString.startsWith("Key: ")) {
-                eventKeyString.substring(5).trim()
-            } else {
-                eventKey.keyCode.toString()
-            }
-
-        val eventKeyNormalized = normalizeKeyName(eventKeyName)
+        val eventKeyNormalized = normalizeKeyName(keyName(eventKey))
         val bindingKeyNormalized = normalizeKeyName(bindingKeyName)
 
         return eventKeyNormalized.equals(bindingKeyNormalized, ignoreCase = true)

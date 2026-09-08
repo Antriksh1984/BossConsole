@@ -43,6 +43,36 @@ internal fun canonicalKeyName(keyName: String): String {
 }
 
 /**
+ * Every spelling [canonicalKeyName] specifically recognises: every alias it folds away, plus
+ * every canonical name those aliases fold onto.
+ *
+ * Exposed for `ShortcutTestRunner.validateKeyName` (BossConsole#375), which used to maintain its
+ * own, fourth copy of this vocabulary and had drifted from it - F1-F12 were simply absent, and
+ * "Left Bracket"/"Back Slash" were already-valid aliases here that copy had never learned about.
+ * A single letter or a function key (`F1`-`F24`) needs no entry here at all: `canonicalKeyName`
+ * folds nothing for them because AWT/Compose report them identically regardless of Toolkit
+ * warm-up state, which is the only reason anything else in this table needs an alias.
+ */
+fun knownCanonicalKeyNames(): Set<String> = KEY_ALIASES.keys + KEY_ALIASES.values
+
+/**
+ * The name a Compose [Key] answers to for storage/comparison, matching exactly what
+ * [KeymapMatcher][ai.rever.boss.keymap.handler.KeymapMatcher] derives from a live key event:
+ * `Key.toString()`'s `"Key: X"` payload, or the packed numeric `keyCode` for the rare key with no
+ * name at all.
+ *
+ * Exposed so [KeyCaptureDialog][ai.rever.boss.components.settings.keymap.KeyCaptureDialog] can
+ * persist (and preview) a name the matchers actually understand, rather than always writing the
+ * packed keyCode - a rebind made through that dialog used to save as e.g. `"281474976710721"`,
+ * which both matchers reduce to itself (no alias exists for a raw number) and so never fires
+ * (BossConsole#329).
+ */
+fun keyName(key: androidx.compose.ui.input.key.Key): String {
+    val keyString = key.toString()
+    return if (keyString.startsWith("Key: ")) keyString.substring(5).trim() else key.keyCode.toString()
+}
+
+/**
  * Every spelling that is not already its own canonical name, keyed lowercase.
  *
  * A table rather than a `when` so adding a spelling is a one-line edit and the function stays
@@ -61,8 +91,8 @@ private val KEY_ALIASES: Map<String, String> =
         alias("directionup", "up", "arrowup", "↑")
         alias("directiondown", "down", "arrowdown", "↓")
         alias("space", "spacebar", "␣", " ")
-        alias("escape", "esc")
-        alias("enter", "return")
+        alias("escape", "esc", "⎋")
+        alias("enter", "return", "⏎")
         // A dedicated + key and Shift+= are the same chord to every preset: zoom in is stored as
         // Equals with a Cmd+Shift+Equals alternate.
         alias("equals", "plus", "+", "=")
@@ -76,12 +106,29 @@ private val KEY_ALIASES: Map<String, String> =
         alias("closebracket", "close bracket", "right bracket", "rightbracket", "]")
         // Shift+/ reports "?" on a US layout.
         alias("slash", "/", "?")
-        alias("backslash", "\\")
+        // "Back Slash"/"Quote"/"Back Quote" are AWT's cold-Toolkit spellings for these three -
+        // the bare-character forms already covered here are what it reports once the Toolkit has
+        // warmed up (BossConsole#372). Both must fold, since which one a given keypress produces
+        // depends on process state the matcher has no control over.
+        alias("backslash", "\\", "back slash")
         alias("semicolon", ";")
-        alias("apostrophe", "'")
+        alias("apostrophe", "'", "quote")
         alias("comma", ",")
         alias("period", ".")
-        alias("grave", "`")
+        alias("grave", "`", "back quote")
+        // Tab/Backspace/Delete need no word-form alias - AWT's cold and warm spellings both
+        // lowercase to the same thing as the Key property name - only the *glyph* AWT reports
+        // once the Toolkit is warm needs folding (BossConsole#372).
+        alias("tab", "⇥")
+        alias("backspace", "⌫")
+        alias("delete", "⌦")
+        // Key.MoveHome/Key.MoveEnd/Key.PageUp/Key.PageDown: same DirectionLeft-shaped mismatch as
+        // the arrow keys above - the Key property name and what AWT actually reports disagree, in
+        // two different ways depending on Toolkit warm-up state (BossConsole#372).
+        alias("movehome", "home", "↖")
+        alias("moveend", "end", "↘")
+        alias("pageup", "page up", "⇞")
+        alias("pagedown", "page down", "⇟")
         // Digit characters against the word forms the presets store ("One" for Cmd+1).
         listOf("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
             .forEachIndexed { digit, word -> put(digit.toString(), word) }

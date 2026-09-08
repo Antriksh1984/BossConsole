@@ -3,6 +3,7 @@ package ai.rever.boss.components.settings.keymap
 import ai.rever.boss.keymap.lifecycle.ShortcutLifecycleManager
 import ai.rever.boss.keymap.model.KeyBinding
 import ai.rever.boss.keymap.model.KeymapSettings
+import ai.rever.boss.keymap.model.knownCanonicalKeyNames
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -175,110 +176,37 @@ object ShortcutTestRunner {
         return result
     }
 
+    /** Compose reports F1 through F24 (a few keyboards go that far); none needs an alias. */
+    private val functionKeyName = Regex("""^f([1-9]|1[0-9]|2[0-4])$""")
+
     /**
      * Validates that a key name is recognized and will match when the user presses it.
-     * Checks against known key names that are handled by normalizeKeyName in KeymapMatcher.
      *
      * NOTE: This is a static validation that checks if the key name is in the correct format.
      * It does NOT actually simulate key presses, because creating synthetic KeyEvent objects
-     * in Compose is complex. However, it catches the most common errors:
-     * - Using character forms ("-", "=", "0") instead of word forms ("Minus", "Equals", "Zero")
-     * - Using arrow characters ("←") instead of word forms ("Left")
-     * - Using unknown key names
+     * in Compose is complex.
+     *
+     * BossConsole#375: this used to be its own hand-written set of "valid" spellings - a fourth
+     * copy of the vocabulary [ai.rever.boss.keymap.model.canonicalKeyName] already owns, and it
+     * had drifted from that one: F1-F12 were simply never added, and "Left Bracket"/"Back Slash"
+     * were already-valid aliases the real matchers accept that this copy had never learned about.
+     * It also flagged character forms ("-", "←") as errors demanding a word form - true under an
+     * earlier, pre-unification matcher, but both matchers now canonicalize *both* sides through
+     * the exact same fold before comparing, so a binding stored as "-" matches a real `-` keypress
+     * exactly as reliably as one stored as "Minus". Delegating to
+     * [ai.rever.boss.keymap.model.knownCanonicalKeyNames] instead of hand-maintaining a set here
+     * is what keeps this check unable to drift from what the matchers actually accept again.
      *
      * @return Pair<Boolean, String> - (isValid, errorMessage)
      */
-    private fun validateKeyName(keyName: String): Pair<Boolean, String> {
-        // List of valid key names (word forms that normalizeKeyName handles)
-        val validWordKeyNames =
-            setOf(
-                // Numbers
-                "Zero",
-                "One",
-                "Two",
-                "Three",
-                "Four",
-                "Five",
-                "Six",
-                "Seven",
-                "Eight",
-                "Nine",
-                // Symbols
-                "Minus",
-                "Equals",
-                "Plus",
-                "OpenBracket",
-                "CloseBracket",
-                "Slash",
-                "Backslash",
-                "Semicolon",
-                "Apostrophe",
-                "Comma",
-                "Period",
-                "Grave",
-                // Directions
-                "Left",
-                "Right",
-                "Up",
-                "Down",
-                "DirectionLeft",
-                "DirectionRight",
-                "DirectionUp",
-                "DirectionDown",
-                // Special keys
-                "Space",
-                "Spacebar",
-                "Enter",
-                "Return",
-                "Escape",
-                "Esc",
-                "Tab",
-                "Backspace",
-                "Delete",
-            )
+    internal fun validateKeyName(keyName: String): Pair<Boolean, String> {
+        val lower = keyName.lowercase()
+        val isKnown =
+            (keyName.length == 1 && keyName[0].isLetter()) ||
+                functionKeyName.matches(lower) ||
+                lower in knownCanonicalKeyNames()
 
-        // Check if it's a valid word name (case-insensitive)
-        if (validWordKeyNames.any { it.equals(keyName, ignoreCase = true) }) {
-            return Pair(true, "")
-        }
-
-        // Check if it's a single letter (A-Z)
-        if (keyName.length == 1 && keyName[0].isLetter()) {
-            return Pair(true, "")
-        }
-
-        // Check if it's a single character that should be a word name
-        val characterToWordMap =
-            mapOf(
-                // Symbols
-                "-" to "Minus",
-                "=" to "Equals",
-                "+" to "Plus",
-                // Numbers
-                "0" to "Zero",
-                "1" to "One",
-                "2" to "Two",
-                "3" to "Three",
-                "4" to "Four",
-                "5" to "Five",
-                "6" to "Six",
-                "7" to "Seven",
-                "8" to "Eight",
-                "9" to "Nine",
-                // Arrow characters
-                "←" to "Left",
-                "→" to "Right",
-                "↑" to "Up",
-                "↓" to "Down",
-            )
-
-        if (characterToWordMap.containsKey(keyName)) {
-            val correctName = characterToWordMap[keyName]
-            return Pair(false, "Key name should be '$correctName' not '$keyName'")
-        }
-
-        // Unknown key name
-        return Pair(false, "Unknown key name '$keyName' - won't match user input")
+        return if (isKnown) Pair(true, "") else Pair(false, "Unknown key name '$keyName' - won't match user input")
     }
 
     /**

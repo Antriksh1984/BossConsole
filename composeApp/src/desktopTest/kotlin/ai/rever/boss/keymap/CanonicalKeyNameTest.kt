@@ -61,8 +61,42 @@ class CanonicalKeyNameTest {
     @Test
     fun `named keys with more than one spelling`() {
         assertAllSame("Space", "Spacebar", "␣", " ")
-        assertAllSame("Escape", "Esc")
-        assertAllSame("Enter", "Return")
+        assertAllSame("Escape", "Esc", "⎋")
+        assertAllSame("Enter", "Return", "⏎")
+    }
+
+    /**
+     * BossConsole#372: `Key.toString()` falls through to AWT's `KeyEvent.getKeyText`, which is
+     * not a stable vocabulary - it answers with a word while the Toolkit is cold and a glyph once
+     * it is warm. Measured directly on macOS: `Tab` cold, `⇥` running; `Home`/`End` cold,
+     * `↖`/`↘` running; `Page Up`/`Page Down` cold, `⇞`/`⇟` running; `Back Slash`/`Quote`/
+     * `Back Quote` cold, the bare character running. `Ctrl+Tab`/`Ctrl+Shift+Tab` ship in all four
+     * presets and resolved to nothing on the Compose matcher path before this, surviving only
+     * because the AWT path still worked.
+     */
+    @Test
+    fun `glyphs AWT reports once the Toolkit is warm, alongside their cold spellings`() {
+        assertAllSame("Tab", "tab", "⇥")
+        assertAllSame("Backspace", "backspace", "⌫")
+        assertAllSame("Delete", "delete", "⌦")
+    }
+
+    @Test
+    fun `Home, End, Page Up and Page Down across their Key property name, cold AWT and glyph forms`() {
+        // Same DirectionLeft-shaped mismatch as the arrow keys: the Key property name
+        // ("MoveHome") and what AWT actually reports ("Home") disagree outright, not just by case.
+        assertAllSame("MoveHome", "Home", "↖")
+        assertAllSame("MoveEnd", "End", "↘")
+        assertAllSame("PageUp", "Page Up", "⇞")
+        assertAllSame("PageDown", "Page Down", "⇟")
+        assertNotEquals(canonicalKeyName("MoveHome"), canonicalKeyName("MoveEnd"))
+    }
+
+    @Test
+    fun `Back Slash, Quote and Back Quote are AWT's cold spellings for their bare characters`() {
+        assertAllSame("Backslash", "\\", "Back Slash", "back slash")
+        assertAllSame("Apostrophe", "'", "Quote", "quote")
+        assertAllSame("Grave", "`", "Back Quote", "back quote")
     }
 
     @Test

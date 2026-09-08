@@ -2,6 +2,7 @@ package ai.rever.boss.components.settings.keymap
 
 import ai.rever.boss.keymap.model.KeyBinding
 import ai.rever.boss.keymap.model.ShortcutContext
+import ai.rever.boss.keymap.model.keyName
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.utils.SystemUtils
@@ -209,7 +210,13 @@ fun KeyCaptureDialog(
                                 val binding =
                                     KeyBinding(
                                         actionId = actionId,
-                                        key = capturedKey!!.keyCode.toString(),
+                                        // BossConsole#329: this used to persist the packed
+                                        // numeric keyCode, which neither matcher has an alias
+                                        // for - a rebind made here appeared to save (the list
+                                        // reformats whatever is stored) and then silently fired
+                                        // on neither path. keyName() is exactly what both
+                                        // matchers themselves derive from a live key event.
+                                        key = keyName(capturedKey!!),
                                         modifiers = capturedModifiers,
                                         context = context,
                                         category = category,
@@ -278,7 +285,10 @@ private fun buildDisplayString(
             }
         }
 
-    val keyString = formatKeyDisplay(key.keyCode.toString())
+    // Same fix as the persisted binding below: keyCode.toString() fed formatKeyDisplay a raw
+    // number, which matches none of its word-name branches, so the live preview showed the
+    // packed keyCode instead of a glyph for every key while capturing.
+    val keyString = formatKeyDisplay(keyName(key))
 
     return (modifierStrings + keyString).joinToString(if (isMac) "" else "+")
 }
