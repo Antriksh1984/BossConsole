@@ -672,15 +672,24 @@ data class PluginDetailResponse(
             else -> PluginType.PANEL
         }
 
-    private fun parseTimestamp(timestamp: String): Long {
-        // Simple ISO timestamp parsing - return 0 if parsing fails
-        return try {
-            // Remove timezone info and parse
-            0L // TODO: Implement proper timestamp parsing if needed
-        } catch (_: Exception) {
+    /**
+     * Parses an ISO-8601 timestamp (e.g. `2024-05-12T14:30:00Z`, or with a numeric offset) into
+     * epoch milliseconds. BossConsole#337: this used to be a stub that always returned `0L`, so
+     * every plugin fetched from the store showed "Last Updated"/"Published" as the Unix epoch
+     * in the Toolbox UI. Falls back to `0L` for a blank, missing, or malformed string - never
+     * throws into the caller, matching the field's own `= ""` default for a store response that
+     * omits it.
+     */
+    private fun parseTimestamp(timestamp: String): Long =
+        if (timestamp.isBlank()) {
             0L
+        } else {
+            runCatching {
+                java.time.Instant
+                    .parse(timestamp)
+                    .toEpochMilli()
+            }.getOrDefault(0L)
         }
-    }
 }
 
 @Serializable
