@@ -2826,6 +2826,23 @@ object FluckEngine {
      * than through `browser.zoom()` so the plugin's zoom-percent indicator stays in step - see
      * [applyBrowserZoom].
      */
+
+    /**
+     * Whether the Cmd+Shift+V clipboard-restore should proceed (BossConsole#205).
+     *
+     * The restore is a time-based guess at when Chromium has finished consuming the plain-text
+     * substitution, and it used to run unconditionally - so a Cmd+C landing in that window was
+     * silently overwritten by the pre-paste contents, with no signal to the user. Only restoring
+     * when the clipboard still holds exactly the plain text this code wrote means a copy that
+     * happened in the meantime wins instead of being clobbered.
+     *
+     * Pure and `internal` for testability - the caller reads the live clipboard, this decides.
+     */
+    internal fun shouldRestoreClipboardAfterPaste(
+        currentClipboardText: String?,
+        plainTextWeWrote: String,
+    ): Boolean = currentClipboardText == plainTextWeWrote
+
     fun setupKeyboardInterceptor(
         browser: com.teamdev.jxbrowser.browser.Browser,
         ownerWindowId: String? = null,
@@ -3124,12 +3141,32 @@ object FluckEngine {
                                                 ).keyModifiers(pasteModifiers)
                                                 .build(),
                                         )
-                                        // Restore original clipboard after paste completes
+                                        // Restore original clipboard after paste completes.
+                                        //
+                                        // BossConsole#205: this restore is unconditional and time-based, so
+                                        // anything the user copies during the 200ms window used to be silently
+                                        // replaced by the pre-paste contents with no signal - a Cmd+C landing in
+                                        // that window was simply lost. Only restoring when the clipboard still
+                                        // holds exactly the plain text we wrote means a copy that happened in the
+                                        // meantime wins instead of being clobbered.
+                                        //
+                                        // Known, and deliberate: this does not close every race the issue names.
+                                        // Two Cmd+Shift+V presses within 200ms of each other can still restore in
+                                        // the wrong order (the second press's "original" is the first press's
+                                        // plain-text substitution, not the true original), and the 200ms is still
+                                        // a guess at Chromium's own paste-consumption timing. Neither has a clean
+                                        // fix without reintroducing the injected-JS path #204 deliberately removed
+                                        // - this closes the specific, common race (an ordinary copy landing in the
+                                        // window), not every race the delay-based approach can produce.
                                         if (originalContents != null) {
                                             CoroutineScope(Dispatchers.IO).launch {
                                                 delay(200)
                                                 try {
-                                                    clipboard.setContents(originalContents, null)
+                                                    val stringFlavor = java.awt.datatransfer.DataFlavor.stringFlavor
+                                                    val currentText = clipboard.getData(stringFlavor) as? String
+                                                    if (shouldRestoreClipboardAfterPaste(currentText, plainText)) {
+                                                        clipboard.setContents(originalContents, null)
+                                                    }
                                                 } catch (_: Exception) {
                                                 }
                                             }
