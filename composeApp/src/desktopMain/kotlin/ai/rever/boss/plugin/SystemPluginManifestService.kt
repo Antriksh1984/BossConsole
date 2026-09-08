@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -227,8 +228,25 @@ object SystemPluginManifestService {
         started = true
         onAdditions = onNewPluginsInstallable
 
-        scope.launch { refreshFromRemote() }
+        scope.launch {
+            awaitSupabaseInitialized()
+            refreshFromRemote()
+        }
         subscribeToChanges()
+    }
+
+    /**
+     * BossConsole#370: `startSync` used to run before `SupabaseConfig` finished its own async
+     * `initialize()` call in the Compose UI layer, so the startup fetch and the first
+     * subscribe attempt both hit `SupabaseConfig.client`'s "not initialized" throw - logged as a
+     * warning here and, for the subscription, driving an unnecessary first trip through
+     * [subscribeToChanges]'s backoff retry loop. `SupabaseConfig.isInitialized` already exists
+     * for exactly this; suspending here once, before either launched coroutine touches the
+     * client, replaces a guaranteed-to-fail-once startup path with a wait for the real
+     * precondition.
+     */
+    private suspend fun awaitSupabaseInitialized() {
+        SupabaseConfig.isInitialized.first { it }
     }
 
     // Block body, not expression body: the early `return`s inside withLock are
@@ -303,6 +321,8 @@ object SystemPluginManifestService {
 
     private fun subscribeToChanges() {
         scope.launch {
+            awaitSupabaseInitialized()
+
             var backoffMs = 5_000L
             val maxBackoffMs = 60_000L
 
