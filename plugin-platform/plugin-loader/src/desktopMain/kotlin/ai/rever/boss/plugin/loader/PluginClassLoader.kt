@@ -211,10 +211,6 @@ class PluginClassLoader(
             )
     }
 
-    init {
-        synchronized(allInstances) { allInstances.add(this) }
-    }
-
     /**
      * Whether this loader defined the class named [name] (i.e. the class came
      * from the plugin JAR, not a shared parent-first package). Reads the JVM's
@@ -259,6 +255,11 @@ class PluginClassLoader(
      * and satisfied own-JAR lookups do not add entries.
      */
     private val refusedResourceNames: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    init {
+        // Publish only after lifecycle fields are initialized: reconciliation reads them concurrently.
+        synchronized(allInstances) { allInstances.add(this) }
+    }
 
     /**
      * Whether this classloader has been marked for unloading.

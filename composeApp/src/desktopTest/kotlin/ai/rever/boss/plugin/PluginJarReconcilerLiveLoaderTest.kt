@@ -114,6 +114,27 @@ class PluginJarReconcilerLiveLoaderTest {
     }
 
     @Test
+    fun `unloading retains the jar and signature until the last loader closes`() {
+        val dir = tempPluginDir()
+        val id = "ai.rever.boss.plugin.test.reconcile.multiple"
+        val older = manifestJar(dir, "multiple-1.0.0.jar", id, "1.0.0")
+        manifestJar(dir, "multiple-2.0.0.jar", id, "2.0.0")
+        val signature = File(older.absolutePath + ".sig").apply { writeText("test-sidecar") }
+        val first = openLoaderOver(older)
+        val second = openLoaderOver(older)
+        first.close()
+        second.markUnloading()
+        val retained = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(id))
+        assertTrue(older.name in retained.deferred)
+        assertTrue(older.exists())
+        assertTrue(signature.exists())
+        second.close()
+        val removed = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(id))
+        assertTrue(older.name in removed.deleted)
+        assertFalse(signature.exists())
+    }
+
+    @Test
     fun `an unrelated plugin's jar is unaffected by another plugin's live loader`() {
         val dir = tempPluginDir()
         val watchedId = "ai.rever.boss.plugin.test.reconcile.live3"
