@@ -121,6 +121,29 @@ class PluginJarReconcilerSidecarTest {
         }
 
     @Test
+    fun `updating another plugin preserves a staged plugin's running artifacts`() {
+        val dir = tempPluginDir()
+        val stagedId = "test.staged"
+        val updatedId = "test.updated"
+        val old = manifestJar(dir, "staged-old.jar", stagedId, "1.0.0")
+        val staged = manifestJar(dir, "staged-new.jar", stagedId, "2.0.0")
+        PluginSignatureSidecar.write(old.absolutePath, "b2xkLXNpZw==")
+        val replaced = manifestJar(dir, "updated-old.jar", updatedId, "1.0.0")
+        manifestJar(dir, "updated-new.jar", updatedId, "2.0.0")
+
+        PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(updatedId))
+
+        assertTrue(old.exists())
+        assertTrue(File(PluginSignatureSidecar.pathFor(old.absolutePath)).exists())
+        assertTrue(staged.exists())
+        assertFalse(replaced.exists())
+
+        PluginJarReconciler.reconcilePluginDir(dir)
+        assertFalse(old.exists(), "the next startup can remove the superseded artifact")
+        assertFalse(File(PluginSignatureSidecar.pathFor(old.absolutePath)).exists())
+    }
+
+    @Test
     fun `the losing duplicate's sidecar is removed with its jar`() {
         val dir = tempPluginDir()
         val pluginId = "ai.rever.boss.plugin.test.reconcile"

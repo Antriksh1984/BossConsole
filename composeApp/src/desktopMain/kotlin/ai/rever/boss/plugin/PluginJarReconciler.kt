@@ -45,8 +45,13 @@ object PluginJarReconciler {
      * or unload anything. Deletes are best-effort: on Windows the JVM may hold
      * a lock on a previously-loaded JAR and `delete()` returns false — the
      * stale file lingers until the next reconcile.
+     * [pluginIds] limits an in-session update to its own plugin. A full scan is startup-only:
+     * other plugins may have staged newer JARs while their old JARs are still in use.
      */
-    fun reconcilePluginDir(pluginDir: File): ReconcileResult {
+    fun reconcilePluginDir(
+        pluginDir: File,
+        pluginIds: Set<String>? = null,
+    ): ReconcileResult {
         val jars =
             pluginDir
                 .listFiles { file ->
@@ -61,6 +66,8 @@ object PluginJarReconciler {
                 // Unreadable or non-plugin JAR: never delete, never group.
                 skipped.add(jar.name)
             } else if (manifest.pluginId == MicrokernelRuntime.PLUGIN_ID) {
+                skipped.add(jar.name)
+            } else if (pluginIds != null && manifest.pluginId !in pluginIds) {
                 skipped.add(jar.name)
             } else {
                 candidates.add(Candidate(jar, manifest))
