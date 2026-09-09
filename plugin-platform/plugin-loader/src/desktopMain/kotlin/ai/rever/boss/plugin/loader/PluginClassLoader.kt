@@ -123,6 +123,33 @@ class PluginClassLoader(
         }
 
         /**
+         * Same dedup shape as [logRefusal] (BossConsole#58), for a resource lookup rather than a
+         * class load. No throwable to attach: [getResource]/[getResources] answer "not found"
+         * (`null` / an empty enumeration) rather than throwing, so there is nothing to propagate
+         * here beyond the record of the refusal itself.
+         */
+        private fun logResourceRefusal(
+            firstSighting: Boolean,
+            pluginId: String,
+            resourceName: String,
+            state: ClassLoaderState,
+        ) {
+            if (firstSighting) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Refused to resolve a plugin resource against the host after unload",
+                    mapOf("pluginId" to pluginId, "resourceName" to resourceName, "state" to state.name),
+                )
+            } else {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Refused a repeat request for an already-refused plugin resource",
+                    mapOf("pluginId" to pluginId, "resourceName" to resourceName, "state" to state.name),
+                )
+            }
+        }
+
+        /**
          * Default packages that are always shared with the host.
          * These include Kotlin stdlib, coroutines, and BOSS plugin API.
          */
@@ -198,6 +225,9 @@ class PluginClassLoader(
      * stack per name; the refusal itself is never deduped.
      */
     private val refusedClassNames: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Same role as [refusedClassNames], for [getResource]/[getResources] (BossConsole#58). */
+    private val refusedResourceNames: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
      * Whether this classloader has been marked for unloading.
@@ -384,6 +414,15 @@ class PluginClassLoader(
 
     /**
      * Get a resource with child-first strategy for plugin resources.
+     *
+     * Once the loader leaves [ClassLoaderState.ACTIVE], a plugin-jar miss stops delegating to the
+     * parent (BossConsole#58) - the same reasoning [loadClassChildFirst] documents for classes
+     * applies here without a change in shape: a closed `URLClassLoader` answers `findResource`
+     * with `null` for every name, including ones the plugin's own jar carries, so falling through
+     * to `parent.getResource` would silently hand the plugin the host's copy of a resource it
+     * owns. Unlike a class load this has nothing to throw - `getResource` is contractually
+     * "answer or null" - so the fix is to stop returning the wrong non-null answer, not to add a
+     * throw.
      */
     override fun getResource(name: String): URL? {
         // For shared packages, use parent-first
@@ -391,12 +430,23 @@ class PluginClassLoader(
             sharedPackages.any {
                 name.startsWith(it.replace('.', '/'))
             }
+        if (isSharedResource) return super.getResource(name)
 
-        return if (isSharedResource) {
-            super.getResource(name)
-        } else {
-            // Child-first for plugin resources
-            findResource(name) ?: parent.getResource(name)
+        // Child-first for plugin resources
+        val own = findResource(name)
+        return when {
+            own != null -> {
+                own
+            }
+
+            isUnloading -> {
+                logResourceRefusal(refusedResourceNames.add(name), pluginId, name, state)
+                null
+            }
+
+            else -> {
+                parent.getResource(name)
+            }
         }
     }
 
@@ -407,6 +457,13 @@ class PluginClassLoader(
      * in the parent chain (whose jar carries its own
      * META-INF/boss-plugin/plugin.json and jar manifest) that would surface
      * the api jar's copy of non-shared resources ahead of the plugin's own.
+     *
+     * Once unloading, the parent half is dropped entirely rather than appended (BossConsole#58):
+     * post-close, `findResources` enumerates empty for every name, so appending the parent's
+     * entries would hand a `META-INF/services/...` lookup the HOST's service implementations in
+     * place of the plugin's - a `ServiceLoader` provider swap, not a missing file, and it would
+     * not look like a classloader bug at the point it broke something. An empty enumeration is
+     * wrong in a recoverable way; the host's providers are wrong in an invisible one.
      */
     override fun getResources(name: String): java.util.Enumeration<URL> {
         val isSharedResource =
@@ -417,11 +474,20 @@ class PluginClassLoader(
             return super.getResources(name)
         }
         val own = java.util.Collections.list(findResources(name))
-        val fromParents =
-            java.util.Collections
-                .list(parent.getResources(name))
-                .filterNot { it in own }
-        return java.util.Collections.enumeration(own + fromParents)
+        val combined =
+            if (isUnloading) {
+                if (own.isEmpty()) {
+                    logResourceRefusal(refusedResourceNames.add(name), pluginId, name, state)
+                }
+                own
+            } else {
+                val fromParents =
+                    java.util.Collections
+                        .list(parent.getResources(name))
+                        .filterNot { it in own }
+                own + fromParents
+            }
+        return java.util.Collections.enumeration(combined)
     }
 
     /**
