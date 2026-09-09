@@ -1,7 +1,12 @@
 package ai.rever.boss.app.editor
 
+import ai.rever.boss.ipc.proto.services.OpenFileRequest
+import ai.rever.boss.plugin.language.LanguageIds
+import kotlinx.coroutines.runBlocking
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * BossConsole#75: this used to be a hand-maintained table independent of
@@ -58,6 +63,28 @@ class EditorServiceImplTest {
         assertEquals("batch", service.detectLanguage("bat"))
         assertEquals("diff", service.detectLanguage("diff"))
     }
+
+    @Test
+    fun `every shared extension agrees with the service`() {
+        LanguageIds.extensions().forEach { (extension, language) ->
+            assertEquals(language, service.detectLanguage(extension), extension)
+        }
+    }
+
+    @Test
+    fun `opening a shell file returns the shared language through the RPC response`() =
+        runBlocking {
+            val file = Files.createTempFile("boss-language-", ".sh").toFile()
+            try {
+                file.writeText("echo hello\n")
+                val response = service.openFile(OpenFileRequest.newBuilder().setPath(file.absolutePath).build())
+                assertTrue(response.success)
+                assertEquals("bash", response.language)
+                assertEquals("echo hello\n", response.content)
+            } finally {
+                file.delete()
+            }
+        }
 
     @Test
     fun `extension lookup is case-insensitive`() {
