@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.loader
 
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import java.io.File
 import java.net.URL
 import java.net.URLClassLoader
 import java.util.concurrent.ConcurrentHashMap
@@ -92,6 +93,27 @@ class PluginClassLoader(
         fun findPluginForClass(className: String): String? {
             val snapshot = synchronized(allInstances) { allInstances.toList() }
             return snapshot.firstOrNull { it.definedClassNamed(className) }?.pluginId
+        }
+
+        /**
+         * Whether any known plugin classloader still has [path] open - state `ACTIVE` or
+         * `UNLOAD_IN_PROGRESS`, i.e. [close] has not run yet (BossConsole#72).
+         *
+         * `PluginJarReconciler` uses this before deleting a superseded jar: a live classloader
+         * merely existing is not sufficient, because not everything reads a plugin through the
+         * classloader. pty4j resolves its native helper by reopening its OWN jar by filename the
+         * first time a PTY is created, so a jar deleted out from under a still-open loader breaks
+         * that lookup even though nothing about the loader itself changed.
+         */
+        fun isPathOpenByLiveLoader(path: String): Boolean {
+            val target = runCatching { File(path).canonicalPath }.getOrNull() ?: return false
+            val snapshot = synchronized(allInstances) { allInstances.toList() }
+            return snapshot.any { loader ->
+                loader.state != ClassLoaderState.UNLOADED &&
+                    loader.getURLs().any { url ->
+                        runCatching { File(url.toURI()).canonicalPath == target }.getOrDefault(false)
+                    }
+            }
         }
 
         /**
