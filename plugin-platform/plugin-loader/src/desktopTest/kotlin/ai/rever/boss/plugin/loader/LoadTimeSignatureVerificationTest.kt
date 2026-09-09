@@ -182,4 +182,56 @@ class LoadTimeSignatureVerificationTest {
             val result = testLoader().loadPlugin(jar.absolutePath)
             assertIs<PluginSignatureException>(result.exceptionOrNull())
         }
+
+    // BossConsole#102: a bundled-trust marker is a permanent exemption from store-signature
+    // enforcement (unlike the rollout warn-path, it stays exempt once enforcement flips), because
+    // a bundled JAR has no store signature to eventually gain — its integrity comes from the app's
+    // own code signature, checked before any of this code runs at all.
+
+    @Test
+    fun `a trusted bundled marker exempts a missing sidecar even under enforcement`() =
+        runBlocking<Unit> {
+            val id = "com.example.sig.bundled"
+            val jar = manifestJar(id, "1.0.0")
+            tempFiles.add(File(PluginBundledTrust.pathFor(jar.absolutePath)))
+            PluginBundledTrust.markTrusted(jar.absolutePath, sha256(jar))
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            System.setProperty("boss.dev.mode", "false")
+
+            // Past the gate the load proceeds and fails on the missing main class,
+            // proving the bundled-trust exemption allowed it through despite enforcement.
+            val result = testLoader().loadPlugin(jar.absolutePath)
+            assertIs<PluginClassException>(result.exceptionOrNull())
+        }
+
+    @Test
+    fun `a bundled-trust marker does not exempt bytes it was not written for`() =
+        runBlocking<Unit> {
+            val id = "com.example.sig.bundled.tampered"
+            val jar = manifestJar(id, "1.0.0")
+            tempFiles.add(File(PluginBundledTrust.pathFor(jar.absolutePath)))
+            PluginBundledTrust.markTrusted(jar.absolutePath, sha256(jar))
+            // Bytes changed after the marker was written — same filename, different content
+            // (a stale reconciler leftover, a manual side-load): must not inherit trust.
+            jar.appendBytes("tamper".toByteArray())
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            System.setProperty("boss.dev.mode", "false")
+
+            val result = testLoader().loadPlugin(jar.absolutePath)
+            assertIs<PluginSignatureException>(result.exceptionOrNull())
+        }
+
+    @Test
+    fun `an untrusted jar still hard-fails under enforcement`() =
+        runBlocking<Unit> {
+            // No marker at all — the ordinary rollout-enforcement path, unaffected by the
+            // bundled-trust exemption's existence.
+            val id = "com.example.sig.notbundled"
+            val jar = manifestJar(id, "1.0.0")
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            System.setProperty("boss.dev.mode", "false")
+
+            val result = testLoader().loadPlugin(jar.absolutePath)
+            assertIs<PluginSignatureException>(result.exceptionOrNull())
+        }
 }

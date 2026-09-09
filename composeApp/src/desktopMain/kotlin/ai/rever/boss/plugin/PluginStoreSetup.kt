@@ -2,6 +2,8 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.loader.FileHashing
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginStoreTrust
@@ -1764,6 +1766,7 @@ object PluginStoreSetup {
                     // exists to prevent.
                     if (oldJarDeleted) {
                         runCatching { PluginSignatureSidecar.delete(oldJar.absolutePath) }
+                        runCatching { PluginBundledTrust.delete(oldJar.absolutePath) }
                     }
                 }
 
@@ -1785,10 +1788,23 @@ object PluginStoreSetup {
                 // left a sidecar behind. Clearing afterwards would leave a crash
                 // window pairing the old signature with new bytes, which is a hard
                 // load failure, unlike no sidecar at all. `copyTo` is not atomic
-                // either, so the window is real.
+                // either, so the window is real. The bundled-trust marker gets the
+                // same treatment for the same reason — a stale marker matching new
+                // bytes by coincidence is not a realistic risk, but nothing here
+                // depends on that being true.
                 runCatching { PluginSignatureSidecar.delete(destFile.absolutePath) }
+                runCatching { PluginBundledTrust.delete(destFile.absolutePath) }
 
                 jarFile.copyTo(destFile, overwrite = true)
+
+                // Mark these exact bytes trusted (BossConsole#102): this copy IS the
+                // bundled JAR's provenance check — it just came from the signed,
+                // notarized app image — so record it here rather than re-deriving
+                // "was this a bundled load" later, once the file is indistinguishable
+                // from any other JAR sitting in the plugin directory.
+                runCatching {
+                    PluginBundledTrust.markTrusted(destFile.absolutePath, FileHashing.sha256(destFile))
+                }
 
                 logger.info(
                     LogCategory.SYSTEM,
