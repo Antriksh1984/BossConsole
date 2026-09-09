@@ -293,7 +293,7 @@ class PluginClassLoader(
     /**
      * Mark this classloader as fully unloaded.
      */
-    fun markUnloaded() {
+    private fun markUnloaded() {
         _state.set(ClassLoaderState.UNLOADED)
         logger.debug(
             LogCategory.SYSTEM,

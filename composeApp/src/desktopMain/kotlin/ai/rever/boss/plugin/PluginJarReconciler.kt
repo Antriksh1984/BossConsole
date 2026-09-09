@@ -32,7 +32,8 @@ import java.io.File
  * first time a PTY is created, so deleting the file out from under a plugin
  * that has not finished unloading breaks that lookup even though nothing
  * about the classloader itself changed. Deferred jars are swept on a later
- * reconcile, once the loader that held them has actually closed.
+ * reconcile, normally at the next launch. Closing a loader does not trigger a sweep.
+ * Work that outlives classloader closure remains the separate BossConsole#207 issue.
  */
 object PluginJarReconciler {
     private val logger = BossLogger.forComponent("PluginJarReconciler")
