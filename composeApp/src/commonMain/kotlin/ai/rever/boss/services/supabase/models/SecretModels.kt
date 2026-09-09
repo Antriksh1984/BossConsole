@@ -39,7 +39,10 @@ data class SecretEntry(
     // affordance the server may since have revoked.
     @SerialName("can_manage")
     val canManage: Boolean? = null,
-)
+) {
+    /** Fail-closed reading of [canManage]: unknown (null) is "no". */
+    val canManageOrDeny: Boolean get() = canManage == true
+}
 
 /**
  * Metadata for a secret (2FA information)
@@ -190,6 +193,9 @@ data class SecretEntryWithSharing(
     @SerialName("can_manage")
     val canManage: Boolean? = null,
 ) {
+    /** Fail-closed reading of [canManage]: unknown (null) is "no". */
+    val canManageOrDeny: Boolean get() = canManage == true
+
     /**
      * Convert to regular SecretEntry for compatibility
      */

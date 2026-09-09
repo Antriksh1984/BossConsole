@@ -95,6 +95,11 @@ class SecretDecodingTest {
             assertNull(shared.canManage)
             assertNull(shared.isOrgOwned)
             assertNull(shared.toSecretEntry().canManage)
+            // canManageOrDeny is the fail-closed reading either an absent column (an
+            // older/newer server) or an explicit null resolves to - "unknown" must never
+            // grant the edit affordance a caller gates on this.
+            assertEquals(false, plain.canManageOrDeny)
+            assertEquals(false, shared.canManageOrDeny)
         }
     }
 
@@ -125,6 +130,11 @@ class SecretDecodingTest {
         assertEquals("acme", secrets[1].orgSlug)
         assertEquals(true, secrets[1].isOrgOwned)
         assertEquals(true, secrets[1].canManage)
+        // orgColumns always sends can_manage=true regardless of org ownership - canManageOrDeny
+        // agrees with the raw column on this row shape; the null/absent case is covered by
+        // `absent and explicit null organisation permissions stay unknown`.
+        assertEquals(true, secrets[0].canManageOrDeny)
+        assertEquals(true, secrets[1].canManageOrDeny)
     }
 
     @Test
