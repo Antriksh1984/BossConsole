@@ -174,7 +174,7 @@ actual object PluginUpdateBridge {
             }
         return if (result.isSuccess) {
             PluginUpdateRegistry.clear(pluginId)
-            if (!deferHotReload) discardReplacedPluginJar(runningJarPath, targetPath)
+            reconcileUpdatedPlugin(pluginDir, pluginId, deferHotReload)
             Result.success(update.newVersion)
         } else {
             discardIfUnswapped(swapStarted, targetFile)
@@ -182,18 +182,11 @@ actual object PluginUpdateBridge {
         }
     }
 
-    internal fun discardReplacedPluginJar(
-        previousPath: String?,
-        installedPath: String,
-    ) {
-        if (previousPath == null) return
-        val previous = File(previousPath)
+    internal fun reconcileUpdatedPlugin(pluginDir: File, pluginId: String, deferred: Boolean) {
+        if (deferred) return
         runCatching {
-            val isDifferent = previous.canonicalFile != File(installedPath).canonicalFile
-            if (isDifferent && (!previous.exists() || previous.delete())) {
-                PluginSignatureSidecar.delete(previous.absolutePath)
-            }
-        }.onFailure { logger.warn(LogCategory.SYSTEM, "Could not remove superseded plugin artifact", error = it) }
+            ai.rever.boss.plugin.PluginJarReconciler.reconcilePluginDir(pluginDir, pluginIds = setOf(pluginId))
+        }.onFailure { logger.warn(LogCategory.SYSTEM, "Post-update plugin reconcile failed", error = it) }
     }
 
     private suspend fun activateUpdate(
