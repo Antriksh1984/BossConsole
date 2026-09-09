@@ -145,6 +145,31 @@ class RemoteSurfaceInputComposeTest {
     }
 
     @Test
+    fun `a component attached before registration follows an opted in reconnect`() {
+        val registry = RemoteUiSurfaceRegistry()
+        val panel = RemotePanelComponent(PANEL, "Test Panel", PROCESS, registry)
+        panel.attach()
+        compose.setContent { panel.Content() }
+        val original = registry.accept(PANEL)
+        original.pushTree(textFieldTree())
+        registry.openStream(PANEL, PROCESS)
+        registry.closeStream(original)
+
+        val replacement = registry.accept(PANEL, wantsKeys = true)
+        replacement.pushTree(textFieldTree())
+        registry.openStream(PANEL, PROCESS)
+        compose.waitForIdle()
+        assertUnboundInLiveKeymap()
+        compose.onNode(hasSetTextAction()).requestFocus()
+        compose.onRoot().performKeyInput {
+            withKeyDown(Key.AltLeft) { withKeyDown(Key.ShiftLeft) { pressKey(Key.F7) } }
+        }
+        compose.waitForIdle()
+        assertEquals(AwtKeyEvent.VK_F7, replacement.firstEventWhere { it.hasKey() }.key.keyCode)
+        panel.dispose()
+    }
+
+    @Test
     fun `a key the focused widget consumes never reaches the plugin`() {
         // "The focused widget gets first refusal" is the property that keeps ordinary typing off the
         // wire — a text field consumes its character keys, so a plugin sees one TextChange per edit

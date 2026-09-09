@@ -9,8 +9,8 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * The host-side renderer of one remote surface, as the transport sees it.
  *
- * Implemented by `RemotePanelComponent` / `RemoteTabComponent`. Both callbacks arrive on whichever thread
- * gRPC delivered the message on, never the UI thread, and both are invoked **while the surface's publish
+ * Implemented by `RemotePanelComponent` / `RemoteTabComponent`. Callbacks arrive on whichever thread
+ * gRPC delivered the message on, never the UI thread, and are invoked **while the surface's publish
  * lock is held** — which is what makes the sequence a host observes monotonic. So an implementation must:
  *
  * - touch only thread-safe state (Compose snapshot state is — writing it from any thread is fine);
@@ -20,6 +20,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Anything heavier belongs on the far side of a state write the UI observes.
  */
 interface RemoteUiSurfaceHost {
+    /** The publishing surface's key declaration, delivered without a registry lookup by the host. */
+    fun onKeyCapabilityChanged(wantsKeys: Boolean) {}
+
     /** A new widget tree to render. */
     fun onTreeUpdated(tree: WidgetTree)
 
@@ -182,10 +185,20 @@ class RemoteUiSurfaceRegistry {
                 processId = processId,
                 descriptor = descriptor,
                 publishTree = { from, tree ->
-                    if (surfaces.stillOwnedBy(from)) hosts[surfaceId]?.onTreeUpdated(tree)
+                    if (surfaces.stillOwnedBy(from)) {
+                        hosts[surfaceId]?.apply {
+                            onKeyCapabilityChanged(from.descriptor.wantsKeys)
+                            onTreeUpdated(tree)
+                        }
+                    }
                 },
                 publishConnected = { from, connected ->
-                    if (surfaces.stillOwnedBy(from)) hosts[surfaceId]?.onConnectionChanged(connected)
+                    if (surfaces.stillOwnedBy(from)) {
+                        hosts[surfaceId]?.apply {
+                            onKeyCapabilityChanged(connected && from.descriptor.wantsKeys)
+                            onConnectionChanged(connected)
+                        }
+                    }
                 },
             )
         val stale = claim(surfaceId, created)
@@ -340,10 +353,12 @@ class RemoteUiSurfaceRegistry {
                 "A second component attached to a surface already being rendered - the first is detached",
                 mapOf("surfaceId" to surfaceId),
             )
+            displaced.onKeyCapabilityChanged(false)
             displaced.onConnectionChanged(false)
         }
         val surface = surfaces[surfaceId]
         if (surface == null) {
+            host.onKeyCapabilityChanged(false)
             host.onConnectionChanged(false)
         } else {
             surface.replayTo(host)

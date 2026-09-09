@@ -41,21 +41,18 @@ internal class RemoteSurfaceComponent(
      */
     private val surfaceHost =
         object : RemoteUiSurfaceHost {
+            override fun onKeyCapabilityChanged(wantsKeys: Boolean) {
+                _wantsKeys.value = wantsKeys
+            }
+
             override fun onTreeUpdated(tree: WidgetTree) {
-                refreshWantsKeys()
                 updateTree(tree)
             }
 
             override fun onConnectionChanged(connected: Boolean) {
-                refreshWantsKeys()
                 _connected.value = connected
             }
         }
-
-    /** Re-read [RemoteUiSurfaceDescriptor.wantsKeys] off the registry; false before registration. */
-    private fun refreshWantsKeys() {
-        _wantsKeys.value = registry.surfaceOf(surfaceId)?.descriptor?.wantsKeys == true
-    }
 
     /** Whether a plugin process is currently streaming this panel's surface. */
     val connected: State<Boolean> get() = _connected

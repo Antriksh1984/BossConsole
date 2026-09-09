@@ -166,6 +166,7 @@ class RemoteUiSurface internal constructor(
      */
     internal fun replayTo(host: RemoteUiSurfaceHost) {
         synchronized(publishLock) {
+            host.onKeyCapabilityChanged(descriptor.wantsKeys)
             host.onConnectionChanged(streaming)
             tree?.let(host::onTreeUpdated)
         }
@@ -197,8 +198,7 @@ class RemoteUiSurface internal constructor(
     internal fun emit(event: UIEvent): Boolean {
         // A composed renderer can still hold the previous registration's capability until its next
         // callback/recomposition. Enforce the receiving registration's immutable policy at enqueue.
-        if (event.hasKey() && !descriptor.wantsKeys) return false
-        if (outgoing.trySend(event).isFailure) return false
+        if ((event.hasKey() && !descriptor.wantsKeys) || outgoing.trySend(event).isFailure) return false
         // DROP_OLDEST evicts inside the channel, so overflow has to be inferred from outside it: the
         // buffer cannot hold more than its capacity, so a count above it means this send probably
         // evicted. "Probably" because the collector decrements just after its receive — see
