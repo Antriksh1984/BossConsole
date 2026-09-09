@@ -265,7 +265,7 @@ class RemoteUiPlacementTest {
             placement.place(surfaceId)
             delay(SETTLE_MS)
             resolvedWindowId = windowId
-            awaitPanel(surfaceId)
+            assertEquals("Panel $surfaceId", awaitPanel(surfaceId).displayName)
         }
 
     @Test
@@ -288,7 +288,7 @@ class RemoteUiPlacementTest {
             delay(SETTLE_MS)
             failResolution.set(false)
             recovering.place(surfaceId)
-            awaitPanel(surfaceId)
+            assertEquals("Panel $surfaceId", awaitPanel(surfaceId).displayName)
         }
 
     // ---- Helpers ----
