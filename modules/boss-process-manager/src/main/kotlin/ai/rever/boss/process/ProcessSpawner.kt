@@ -94,10 +94,17 @@ class ProcessSpawner
                 putAll(config.environment)
                 // Minted after config.environment, so nothing a caller supplies can shadow the real
                 // credential — only the kernel gets to say what a process's own token is. Never logged.
-                tokenRegistry?.issue(config.processId)?.let { put("BOSS_PROCESS_TOKEN", it) }
             }
 
-            val process = processBuilder.start()
+            val token = tokenRegistry?.issue(config.processId)
+            val process =
+                runCatching {
+                    token?.let { processBuilder.environment()["BOSS_PROCESS_TOKEN"] = it }
+                    processBuilder.start()
+                }.onFailure {
+                    tokenRegistry?.revokeIfCurrent(config.processId, token)
+                }.getOrThrow()
+            process.onExit().thenRun { tokenRegistry?.revokeIfCurrent(config.processId, token) }
 
             logger.info(
                 "Process started: id={}, pid={}, ipc={}",
@@ -114,16 +121,6 @@ class ProcessSpawner
                 it.ipcClient = BossIpcClient(ipcAddress)
                 registry?.register(config.processId, it)
             }
-        }
-
-        /**
-         * Invalidate [processId]'s IPC credential, if this spawner was given a `tokenRegistry`. A no-op
-         * otherwise. Call this once a process is actually gone for good — not on every crash, since a
-         * respawn already gets a fresh credential from [spawn] itself; this is for the paths that mean
-         * "not coming back" (a deliberate `terminate()`, or the kernel's own shutdown reap).
-         */
-        fun revokeToken(processId: String) {
-            tokenRegistry?.revoke(processId)
         }
 
         private fun buildCommand(config: ProcessConfig): List<String> {

@@ -59,6 +59,15 @@ class RemoteWidgetRendererComposeTest {
     val compose = createComposeRule()
 
     @Test
+    fun `remote content shows disconnection and clears it when connected`() {
+        val connected = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent { RemoteSurfaceContent(null, connected.value) { _, _ -> } }
+        compose.onNodeWithText("Remote surface disconnected").assertExists()
+        compose.runOnIdle { connected.value = true }
+        compose.onNodeWithText("Remote surface disconnected").assertDoesNotExist()
+    }
+
+    @Test
     fun `a text field reports no focus event on its first composition`() {
         // onFocusChanged also fires when a node's focus state is first resolved on attach. Wired straight
         // through, every field announced focus *loss* the moment it rendered, and a plugin could not tell
@@ -205,12 +214,7 @@ class RemoteWidgetRendererComposeTest {
                 .start()
         // Authenticated as "plugin-a", matching this test's registration/panel process id - the bridge
         // now verifies identity before RegisterUI/StreamUI/UnregisterUI (BossConsole#53).
-        val channel =
-            ManagedChannelBuilder
-                .forAddress("localhost", server.port)
-                .usePlaintext()
-                .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue("plugin-a")))
-                .build()
+        val channel = authenticatedChannel(server.port, tokenRegistry)
         val plugin = PluginUIServiceGrpcKt.PluginUIServiceCoroutineStub(channel)
         val pluginScope = CoroutineScope(Dispatchers.Default)
         val panel = RemotePanelComponent(PANEL, "Test Panel", "plugin-a", registry)
@@ -268,6 +272,15 @@ class RemoteWidgetRendererComposeTest {
             server.shutdownNow()
         }
     }
+
+    private fun authenticatedChannel(
+        port: Int,
+        tokenRegistry: ProcessTokenRegistry,
+    ) = ManagedChannelBuilder
+        .forAddress("localhost", port)
+        .usePlaintext()
+        .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue("plugin-a")))
+        .build()
 
     /**
      * The first event queued for a surface.

@@ -29,6 +29,10 @@ private fun newProcessToken(): String {
  * whatever verifies them (a [ProcessIdentityInterceptor] on the kernel's IPC server), so both sides of
  * a spawn agree on the same table. Thread-safe: a token is issued from the spawning thread and looked
  * up from gRPC's own threads.
+ *
+ * This authenticates possession of a child credential, not an OS sandbox boundary. The environment
+ * can be inherited by descendants or inspected by same-user processes. Plugin runtimes should strip
+ * BOSS_PROCESS_TOKEN before launching unrelated subprocesses and must never print their environment.
  */
 class ProcessTokenRegistry {
     private val processIdByToken = ConcurrentHashMap<String, String>()
@@ -42,6 +46,7 @@ class ProcessTokenRegistry {
      * accidentally inherit the previous process's credential"), since a respawn calls this again for
      * the same id and the old token stops resolving to anything the moment the new one is stored.
      */
+    @Synchronized
     fun issue(processId: String): String {
         val token = newProcessToken()
         tokenByProcessId.put(processId, token)?.let { previous -> processIdByToken.remove(previous, processId) }
@@ -54,12 +59,23 @@ class ProcessTokenRegistry {
      * currently holds — absent, blank, unknown, or a token a later [issue] or [revoke] has since
      * invalidated.
      */
+    @Synchronized
     fun identityFor(token: String?): String? {
         if (token.isNullOrBlank()) return null
         return processIdByToken[token]
     }
 
+    /** A late exit callback must not revoke a replacement process's credential. */
+    @Synchronized
+    fun revokeIfCurrent(
+        processId: String,
+        token: String?,
+    ) {
+        if (token != null && tokenByProcessId[processId] == token) revoke(processId)
+    }
+
     /** Invalidate [processId]'s current credential, if it has one. Idempotent. */
+    @Synchronized
     fun revoke(processId: String) {
         tokenByProcessId.remove(processId)?.let { processIdByToken.remove(it, processId) }
     }

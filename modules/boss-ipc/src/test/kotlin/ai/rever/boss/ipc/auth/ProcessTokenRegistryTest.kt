@@ -14,6 +14,43 @@ import kotlin.test.assertNull
  */
 class ProcessTokenRegistryTest {
     @Test
+    fun `late process exit cannot revoke its replacement credential`() {
+        val registry = ProcessTokenRegistry()
+        val old = registry.issue("process")
+        val current = registry.issue("process")
+        registry.revokeIfCurrent("process", old)
+        assertEquals("process", registry.identityFor(current))
+        registry.revokeIfCurrent("process", current)
+        assertNull(registry.identityFor(current))
+    }
+
+    @Test
+    fun `concurrent issuance leaves only one credential and revoke removes it`() {
+        val registry = ProcessTokenRegistry()
+        val executor =
+            java.util.concurrent.Executors
+                .newFixedThreadPool(8)
+        try {
+            repeat(100) {
+                val ready = java.util.concurrent.CyclicBarrier(8)
+                val futures =
+                    (1..8).map {
+                        executor.submit<String> {
+                            ready.await()
+                            registry.issue("same-process")
+                        }
+                    }
+                val tokens = futures.map { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(1, tokens.count { registry.identityFor(it) != null })
+                registry.revoke("same-process")
+                tokens.forEach { assertNull(registry.identityFor(it)) }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `a freshly issued token resolves to the process it was issued for`() {
         val registry = ProcessTokenRegistry()
 

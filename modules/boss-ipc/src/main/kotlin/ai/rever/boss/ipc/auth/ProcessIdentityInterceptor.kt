@@ -29,17 +29,19 @@ class ProcessIdentityInterceptor(
         headers: Metadata,
         next: ServerCallHandler<ReqT, RespT>,
     ): ServerCall.Listener<ReqT> {
-        val identity = registry.identityFor(headers.get(PROCESS_TOKEN_METADATA_KEY))
+        val token = headers.get(PROCESS_TOKEN_METADATA_KEY)
         val context =
-            if (identity != null) {
-                Context.current().withValue(AUTHENTICATED_PROCESS_ID, identity)
-            } else {
-                Context.current()
-            }
+            Context
+                .current()
+                .withValue(AUTHENTICATED_PROCESS_ID, registry.identityFor(token))
+                .withValue(CURRENT_IDENTITY, { registry.identityFor(token) })
         return Contexts.interceptCall(context, call, headers, next)
     }
 
     companion object {
+        /** Revalidate at stream binding, since a call may wait across token revocation. */
+        val CURRENT_IDENTITY: Context.Key<() -> String?> = Context.key("boss-current-process-identity")
+
         /**
          * Wire name of the credential header. ASCII marshaller: the value is an opaque hex token, not
          * binary data that needs one.

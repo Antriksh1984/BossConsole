@@ -42,13 +42,18 @@ class RemoteUiPlacementTest {
     private lateinit var panelRegistry: PanelRegistry
     private lateinit var tabRegistry: TabRegistry
     private lateinit var splitViewState: SplitViewState
+
+    @Volatile
     private var resolvedWindowId: String? = windowId
 
     private val placement =
         RemoteUiPlacement(
             registry = registry,
             scope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
-            resolveWindowId = { resolvedWindowId },
+            resolveWindowId = {
+                assertTrue(javax.swing.SwingUtilities.isEventDispatchThread(), "placement must run on the UI thread")
+                resolvedWindowId
+            },
             maxAttempts = RETRY_ATTEMPTS,
             retryDelayMs = RETRY_DELAY_MS,
         )
@@ -236,7 +241,7 @@ class RemoteUiPlacementTest {
             resolvedWindowId = null
             val surfaceId = "panel-race-unregister"
             registry.register(surfaceId, "plugin-a", panelDescriptor(surfaceId))
-            placement.place(surfaceId)
+            repeat(20) { placement.place(surfaceId) }
             delay(SETTLE_MS) // let at least one failed attempt happen
 
             registry.unregister(surfaceId)
@@ -245,7 +250,45 @@ class RemoteUiPlacementTest {
 
             delay(RETRY_DELAY_MS * (RETRY_ATTEMPTS + 1))
 
-            assertTrue(panelRegistry.getAllPanels().none { it.id.panelId == surfaceId }, "a torn-down surface must never appear")
+            assertTrue(
+                panelRegistry.getAllPanels().none { it.id.panelId == surfaceId },
+                "a torn-down surface must never appear",
+            )
+        }
+
+    @Test
+    fun `a window appearing during retries receives the surface`() =
+        runBlocking {
+            resolvedWindowId = null
+            val surfaceId = "delayed-window"
+            registry.register(surfaceId, "plugin-a", panelDescriptor(surfaceId))
+            placement.place(surfaceId)
+            delay(SETTLE_MS)
+            resolvedWindowId = windowId
+            awaitPanel(surfaceId)
+        }
+
+    @Test
+    fun `failed window resolution is contained and a later placement can succeed`() =
+        runBlocking {
+            val failResolution =
+                java.util.concurrent.atomic
+                    .AtomicBoolean(true)
+            val recovering =
+                RemoteUiPlacement(
+                    registry = registry,
+                    resolveWindowId = {
+                        check(!failResolution.get()) { "simulated unavailable window" }
+                        windowId
+                    },
+                )
+            val surfaceId = "failed-placement"
+            registry.register(surfaceId, "plugin-a", panelDescriptor(surfaceId))
+            recovering.place(surfaceId)
+            delay(SETTLE_MS)
+            failResolution.set(false)
+            recovering.place(surfaceId)
+            awaitPanel(surfaceId)
         }
 
     // ---- Helpers ----
@@ -307,7 +350,7 @@ class RemoteUiPlacementTest {
         const val AWAIT_TIMEOUT_MS = 10_000L
         const val POLL_MS = 10L
         const val SETTLE_MS = 100L
-        const val RETRY_ATTEMPTS = 3
+        const val RETRY_ATTEMPTS = 10
         const val RETRY_DELAY_MS = 40L
     }
 }

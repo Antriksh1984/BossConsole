@@ -22,15 +22,20 @@ import ai.rever.boss.utils.logging.LogCategory
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.arkivanov.decompose.ComponentContext
-import com.arkivanov.essenty.lifecycle.doOnDestroy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -71,12 +76,12 @@ class RemoteUiPlacement(
 
     private data class PlacedPanel(
         val panelId: PanelId,
-        val panelRegistry: PanelRegistry,
+        val panelRegistry: WeakReference<PanelRegistry>,
     )
 
     private data class PlacedTab(
         val typeId: TabTypeId,
-        val tabRegistry: TabRegistry,
+        val tabRegistry: WeakReference<TabRegistry>,
     )
 
     private val placedPanels = ConcurrentHashMap<String, PlacedPanel>()
@@ -92,15 +97,17 @@ class RemoteUiPlacement(
      * [surfaceId] via [placedPanels] / [placedTabs] — a duplicate call (a reclaimed registration
      * racing a prior one) is a no-op past the first.
      */
+    @Synchronized
     fun place(surfaceId: String) {
         val surface = registry.surfaceOf(surfaceId) ?: return
         val descriptor = surface.descriptor
         val job =
-            scope.launch {
+            scope.launch(start = CoroutineStart.LAZY) {
                 placeWithRetry(surfaceId, descriptor, surface.processId)
             }
-        placementJobs[surfaceId] = job
+        placementJobs.put(surfaceId, job)?.cancel()
         job.invokeOnCompletion { placementJobs.remove(surfaceId, job) }
+        job.start()
     }
 
     /**
@@ -115,15 +122,18 @@ class RemoteUiPlacement(
      * `UnregisterUI` — this surface will never come back under this id — means the placement itself
      * should go too.
      */
-    fun remove(surfaceId: String) {
-        placementJobs.remove(surfaceId)?.cancel()
-        placedPanels.remove(surfaceId)?.let { it.panelRegistry.unregisterPanel(it.panelId) }
-        placedTabs.remove(surfaceId)?.let {
-            // unregisterTabType fires this window's own unregister-listener, which closes any tab
-            // of this type exactly the way a plugin unload does — nothing else to do for the
-            // "already open" case.
-            it.tabRegistry.unregisterTabType(it.typeId)
+    suspend fun remove(surfaceId: String) =
+        withContext(NonCancellable + Dispatchers.Main) {
+            // A new accepted registration already supersedes the removal request.
+            if (registry.surfaceOf(surfaceId) != null) return@withContext
+            placementJobs.remove(surfaceId)?.cancel()
+            removePlaced(surfaceId)
         }
+
+    /** Called only on the UI dispatcher, including rollback after a failed placement. */
+    private fun removePlaced(surfaceId: String) {
+        placedPanels.remove(surfaceId)?.let { it.panelRegistry.get()?.unregisterPanel(it.panelId) }
+        placedTabs.remove(surfaceId)?.let { it.tabRegistry.get()?.unregisterTabType(it.typeId) }
     }
 
     /**
@@ -138,7 +148,22 @@ class RemoteUiPlacement(
         processId: String,
     ) {
         repeat(maxAttempts) { attempt ->
-            if (tryPlace(surfaceId, descriptor, processId)) return
+            val done =
+                withContext(Dispatchers.Main) {
+                    registry.surfaceOf(surfaceId) == null ||
+                        runCatching { tryPlace(surfaceId, descriptor, processId) }.getOrElse { failure ->
+                            if (failure is CancellationException) throw failure
+                            runCatching { removePlaced(surfaceId) }
+                            logger.error(
+                                LogCategory.UI,
+                                "Remote UI placement failed",
+                                mapOf("surfaceId" to surfaceId),
+                                error = failure,
+                            )
+                            true
+                        }
+                }
+            if (done) return
             if (attempt < maxAttempts - 1) delay(retryDelayMs)
         }
         logger.warn(
@@ -154,9 +179,10 @@ class RemoteUiPlacement(
         descriptor: RemoteUiSurfaceDescriptor,
         processId: String,
     ): Boolean {
-        val windowId = resolveWindowId() ?: return false
-        val splitViewState = SplitViewStateRegistry.getState(windowId) ?: return false
-        val panelRegistry = PanelComponentStoreRegistry.getStore(windowId)?.registry ?: return false
+        val windowId = resolveWindowId()
+        val splitViewState = windowId?.let(SplitViewStateRegistry::getState)
+        val panelRegistry = windowId?.let(PanelComponentStoreRegistry::getStore)?.registry
+        if (splitViewState == null || panelRegistry == null) return false
 
         return when (descriptor.surfaceType) {
             "panel" -> {
@@ -186,7 +212,10 @@ class RemoteUiPlacement(
         panelRegistry: PanelRegistry,
     ) {
         val id = PanelId(surfaceId, DEFAULT_PANEL_ORDER, REMOTE_PLUGIN_ID)
-        if (placedPanels.putIfAbsent(surfaceId, PlacedPanel(id, panelRegistry)) != null) return
+        val previous = placedPanels[surfaceId]
+        if (previous?.panelRegistry?.get() === panelRegistry) return
+        previous?.let { it.panelRegistry.get()?.unregisterPanel(it.panelId) }
+        placedPanels[surfaceId] = PlacedPanel(id, WeakReference(panelRegistry))
 
         val info =
             RemotePanelInfo(
@@ -220,11 +249,14 @@ class RemoteUiPlacement(
         processId: String,
         splitViewState: SplitViewState,
     ): Boolean {
-        val tabsComponent = splitViewState.getActiveTabsComponent() ?: return true
+        val tabsComponent = splitViewState.getActiveTabsComponent() ?: return false
 
         val typeId = TabTypeId(surfaceId, REMOTE_PLUGIN_ID)
         val displayName = descriptor.displayName.ifBlank { DEFAULT_DISPLAY_NAME }
-        if (placedTabs.putIfAbsent(surfaceId, PlacedTab(typeId, splitViewState.tabRegistry)) == null) {
+        val previous = placedTabs[surfaceId]
+        if (previous?.tabRegistry?.get() !== splitViewState.tabRegistry) {
+            previous?.let { it.tabRegistry.get()?.unregisterTabType(it.typeId) }
+            placedTabs[surfaceId] = PlacedTab(typeId, WeakReference(splitViewState.tabRegistry))
             val typeInfo = RemoteTabTypeInfo(typeId, displayName, REMOTE_ICON)
             splitViewState.tabRegistry.registerTabType(typeInfo) { config, ctx ->
                 val current = registry.surfaceOf(surfaceId)
@@ -256,13 +288,12 @@ class RemoteUiPlacement(
         private val panel: RemotePanelComponent,
     ) : PanelComponentWithUI,
         ComponentContext by ctx {
-        init {
-            panel.attach()
-            lifecycle.doOnDestroy { panel.dispose() }
-        }
-
         @Composable
         override fun Content() {
+            DisposableEffect(panel) {
+                panel.attach()
+                onDispose { panel.dispose() }
+            }
             panel.Content()
         }
     }
@@ -289,13 +320,12 @@ class RemoteUiPlacement(
         private val tab: RemoteTabComponent,
     ) : TabComponentWithUI,
         ComponentContext by ctx {
-        init {
-            tab.attach()
-            lifecycle.doOnDestroy { tab.dispose() }
-        }
-
         @Composable
         override fun Content() {
+            DisposableEffect(tab) {
+                tab.attach()
+                onDispose { tab.dispose() }
+            }
             tab.Content()
         }
     }

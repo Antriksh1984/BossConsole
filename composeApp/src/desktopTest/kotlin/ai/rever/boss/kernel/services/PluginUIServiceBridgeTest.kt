@@ -24,8 +24,6 @@ import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.ui.sdk.DiffOperation
 import ai.rever.boss.ui.sdk.WidgetProtoConverter.toProtoDiff
-import com.arkivanov.decompose.DefaultComponentContext
-import com.arkivanov.essenty.lifecycle.LifecycleRegistry
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import io.grpc.Server
@@ -574,7 +572,8 @@ class PluginUIServiceBridgeTest {
             assertFalse(registry.surfaceOf(PANEL)!!.streaming, "the attempt must not have claimed the surface")
             val legitimate = Channel<WidgetUpdate>(Channel.UNLIMITED)
             coroutineScope {
-                val stream = launch { runCatching { pluginAs("plugin-b").streamUI(legitimate.consumeAsFlow()).toList() } }
+                val stream =
+                    launch { runCatching { pluginAs("plugin-b").streamUI(legitimate.consumeAsFlow()).toList() } }
                 legitimate.send(fullTree(PANEL, label = "mine"))
                 awaitTrue { host.trees.isNotEmpty() }
                 assertEquals("mine", host.trees.last().label())
@@ -660,7 +659,7 @@ class PluginUIServiceBridgeTest {
         val panelRegistry = PanelRegistry()
         val tabRegistry = TabRegistry()
         val splitViewState = SplitViewState(tabRegistry, windowId)
-        val store = PanelComponentStore(DefaultComponentContext(LifecycleRegistry()), panelRegistry)
+        val store = PanelComponentStore(panelRegistry)
         SplitViewStateRegistry.register(windowId, splitViewState)
         PanelComponentStoreRegistry.register(windowId, store)
         val wiredPlacement = RemoteUiPlacement(registry = registry, resolveWindowId = { windowId })
