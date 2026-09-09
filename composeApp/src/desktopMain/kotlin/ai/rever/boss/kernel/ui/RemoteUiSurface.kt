@@ -41,10 +41,8 @@ class RemoteUiSurface internal constructor(
     /**
      * What the plugin declared about this surface at registration.
      *
-     * Retained but unused today: placing a remote surface in the window is the follow-up this transport
-     * unblocks, and that is what will need `surface_type` to pick panel vs tab, `default_slot` to place a
-     * panel, and the name and icon to label it. Dropping them here would mean re-plumbing the protocol
-     * later for data it already carries.
+     * Placement uses the type, slot, name and icon. The renderer observes wantsKeys through
+     * capability callbacks, and emit enforces it against this immutable receiving registration.
      */
     val descriptor: RemoteUiSurfaceDescriptor = RemoteUiSurfaceDescriptor(),
     /**

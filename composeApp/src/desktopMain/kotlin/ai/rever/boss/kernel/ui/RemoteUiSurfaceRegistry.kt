@@ -33,8 +33,8 @@ interface RemoteUiSurfaceHost {
 /**
  * What a plugin declared about a surface when it registered it.
  *
- * Carried, not acted on: placing a remote surface in the window is the follow-up this transport unblocks,
- * and it is what will read these. Mirrors the corresponding `UIRegistration` fields.
+ * Mirrors `UIRegistration`: placement consumes the type/name/icon/slot, and the renderer and
+ * receiving event queue enforce the key declaration.
  */
 data class RemoteUiSurfaceDescriptor(
     val surfaceType: String = "",
@@ -195,6 +195,7 @@ class RemoteUiSurfaceRegistry {
                 publishConnected = { from, connected ->
                     if (surfaces.stillOwnedBy(from)) {
                         hosts[surfaceId]?.apply {
+                            // A false publication comes from close(); reset the tap on teardown.
                             onKeyCapabilityChanged(connected && from.descriptor.wantsKeys)
                             onConnectionChanged(connected)
                         }
@@ -393,8 +394,8 @@ class RemoteUiSurfaceRegistry {
     /**
      * Queue a user event for the plugin behind [surfaceId].
      *
-     * @return `false` when there is nothing to deliver to — no registered surface, or one already closed.
-     *   Callers log and move on; a click that lands during teardown is not an error condition.
+     * @return `false` when no surface is registered, the receiving surface is closed, or a key
+     *   was not requested by its declaration. Callers drop the event rather than retry a policy refusal.
      */
     fun emit(
         surfaceId: String,
