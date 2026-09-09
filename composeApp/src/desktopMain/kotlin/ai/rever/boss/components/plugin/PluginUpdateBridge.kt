@@ -182,10 +182,15 @@ actual object PluginUpdateBridge {
         }
     }
 
-    internal fun reconcileUpdatedPlugin(pluginDir: File, pluginId: String, deferred: Boolean) {
+    internal fun reconcileUpdatedPlugin(
+        pluginDir: File,
+        pluginId: String,
+        deferred: Boolean,
+    ) {
         if (deferred) return
         runCatching {
-            ai.rever.boss.plugin.PluginJarReconciler.reconcilePluginDir(pluginDir, pluginIds = setOf(pluginId))
+            ai.rever.boss.plugin.PluginJarReconciler
+                .reconcilePluginDir(pluginDir, pluginIds = setOf(pluginId))
         }.onFailure { logger.warn(LogCategory.SYSTEM, "Post-update plugin reconcile failed", error = it) }
     }
 

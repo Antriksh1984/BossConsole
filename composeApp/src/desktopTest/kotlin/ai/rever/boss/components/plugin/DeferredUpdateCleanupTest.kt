@@ -13,7 +13,11 @@ class DeferredUpdateCleanupTest {
     @TempDir
     lateinit var dir: File
 
-    private fun jar(name: String, id: String, version: String): File {
+    private fun jar(
+        name: String,
+        id: String,
+        version: String,
+    ): File {
         val file = File(dir, name)
         JarOutputStream(file.outputStream()).use { out ->
             out.putNextEntry(JarEntry("META-INF/boss-plugin/plugin.json"))
