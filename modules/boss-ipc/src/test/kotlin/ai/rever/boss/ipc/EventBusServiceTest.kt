@@ -195,6 +195,7 @@ class EventBusServiceTest {
                 // delivery cannot duplicate the batch or hide a batch with missing entries.
                 val probe = EventEnvelope.newBuilder().setEventType("ReadyProbe").build()
                 while (!ready.isCompleted) {
+                    assertTrue(subscriberJob.isActive, "Subscriber ended before receiving the readiness probe")
                     stub.publish(probe)
                     delay(POLL_MS)
                 }
@@ -203,7 +204,7 @@ class EventBusServiceTest {
                     PublishBatchRequest
                         .newBuilder()
                         .addAllEvents(
-                            (1..3).map { i ->
+                            (1..BATCH_SIZE).map { i ->
                                 EventEnvelope
                                     .newBuilder()
                                     .setEventType("BatchEvent")
@@ -215,10 +216,10 @@ class EventBusServiceTest {
 
                 assertTrue(stub.publishBatch(batchRequest).success)
 
-                // Wait for the three, rather than sleeping long enough that they have probably arrived. The
-                // enclosing withTimeout is the bound if they never do, so a real failure reports as a
-                // timeout instead of an off-by-a-few count that reads like a delivery bug.
+                // Wait for the complete batch. Fail immediately if the stream ends; the enclosing
+                // timeout bounds a live stream that never delivers all expected events.
                 while (received.size < BATCH_SIZE) {
+                    assertTrue(subscriberJob.isActive, "Subscriber ended before receiving the complete batch")
                     delay(POLL_MS)
                 }
                 subscriberJob.cancel()
