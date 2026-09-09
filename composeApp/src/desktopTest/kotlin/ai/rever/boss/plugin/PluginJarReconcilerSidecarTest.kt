@@ -131,16 +131,35 @@ class PluginJarReconcilerSidecarTest {
         val replaced = manifestJar(dir, "updated-old.jar", updatedId, "1.0.0")
         manifestJar(dir, "updated-new.jar", updatedId, "2.0.0")
 
-        PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(updatedId))
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(updatedId))
+        assertEquals(listOf("updated-new.jar"), result.winners.map { it.name })
+        assertTrue(result.skipped.isEmpty())
 
         assertTrue(old.exists())
         assertTrue(File(PluginSignatureSidecar.pathFor(old.absolutePath)).exists())
         assertTrue(staged.exists())
         assertFalse(replaced.exists())
 
-        PluginJarReconciler.reconcilePluginDir(dir)
+        PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
         assertFalse(old.exists(), "the next startup can remove the superseded artifact")
         assertFalse(File(PluginSignatureSidecar.pathFor(old.absolutePath)).exists())
+    }
+
+    @Test
+    fun `an unknown version cannot justify deleting a staged artifact`() {
+        val dir = tempPluginDir()
+        val id = "test.unordered"
+        val old = manifestJar(dir, "old.jar", id, "1.0.0")
+        val staged = manifestJar(dir, "staged.jar", id, "2.0.0+build.1")
+        PluginSignatureSidecar.write(staged.absolutePath, "bmV3LXNpZw==")
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertTrue(result.skipped.isEmpty(), "the manifest is valid; only version ordering is unavailable")
+        assertTrue(result.deleted.isEmpty())
+        assertTrue(old.exists())
+        assertTrue(staged.exists())
+        assertTrue(File(PluginSignatureSidecar.pathFor(staged.absolutePath)).exists())
     }
 
     @Test
@@ -152,7 +171,7 @@ class PluginJarReconcilerSidecarTest {
         PluginSignatureSidecar.write(older.absolutePath, "b2xkLXNpZw==")
         PluginSignatureSidecar.write(newer.absolutePath, "bmV3LXNpZw==")
 
-        val result = PluginJarReconciler.reconcilePluginDir(dir)
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
 
         assertTrue(result.deleted.contains(older.name), "expected the older JAR to be reconciled away")
         assertFalse(older.exists(), "older JAR should be gone")
@@ -173,7 +192,7 @@ class PluginJarReconcilerSidecarTest {
         val jar = manifestJar(dir, "solo-plugin-1.0.0.jar", "ai.rever.boss.plugin.test.solo", "1.0.0")
         PluginSignatureSidecar.write(jar.absolutePath, "c29sby1zaWc=")
 
-        PluginJarReconciler.reconcilePluginDir(dir)
+        PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
 
         assertTrue(jar.exists())
         assertTrue(

@@ -72,9 +72,7 @@ internal data class BackgroundSystemPluginUpdate(
     val onSupersededArtifactProcessed: (File, Boolean) -> Unit,
 )
 
-internal suspend fun finishBackgroundSystemPluginUpdate(
-    update: BackgroundSystemPluginUpdate,
-) {
+internal suspend fun finishBackgroundSystemPluginUpdate(update: BackgroundSystemPluginUpdate) {
     if (!update.plugin.downloadOnly) update.persistLoadablePlugin(update.promotedJar)
     update.persistSignature(update.promotedJar)
 
@@ -1364,7 +1362,7 @@ object PluginStoreSetup {
                 //    installed.json at the kept JAR — different writers use different
                 //    filename conventions, so multiple versions can accumulate and an
                 //    older JAR could otherwise shadow a newer one at scan time.
-                runCatching { PluginJarReconciler.reconcilePluginDir(_pluginDir) }
+                runCatching { PluginJarReconciler.reconcilePluginDir(_pluginDir, pluginIds = null) }
                     .onFailure { e ->
                         logger.warn(
                             LogCategory.SYSTEM,
