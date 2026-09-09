@@ -10,8 +10,6 @@ import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.api.TabTypeId
-import com.arkivanov.decompose.DefaultComponentContext
-import com.arkivanov.essenty.lifecycle.LifecycleRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -60,7 +58,7 @@ class RemoteUiPlacementTest {
         panelRegistry = PanelRegistry()
         tabRegistry = TabRegistry()
         splitViewState = SplitViewState(tabRegistry, windowId)
-        val panelComponentStore = PanelComponentStore(DefaultComponentContext(LifecycleRegistry()), panelRegistry)
+        val panelComponentStore = PanelComponentStore(panelRegistry)
         SplitViewStateRegistry.register(windowId, splitViewState)
         PanelComponentStoreRegistry.register(windowId, panelComponentStore)
     }
