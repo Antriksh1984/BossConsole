@@ -87,6 +87,37 @@ class EditorServiceImplTest {
         }
 
     @Test
+    fun `opening named files uses shared filename precedence and keeps service defaults`() =
+        runBlocking {
+            val directory = Files.createTempDirectory("boss-language-names-").toFile()
+            val cases =
+                mapOf(
+                    "Dockerfile" to "dockerfile",
+                    "Containerfile" to "dockerfile",
+                    "Makefile" to "makefile",
+                    "GNUmakefile" to "makefile",
+                    "Gemfile" to "ruby",
+                    "Rakefile" to "ruby",
+                    "Dockerfile.dev" to "dockerfile",
+                    "Dockerfile.sh" to "dockerfile",
+                    ".env.local" to "properties",
+                    "service.proto" to "protobuf",
+                    "notes.unknown" to "plaintext",
+                    "Gemfile.lock" to "plaintext",
+                )
+            try {
+                cases.forEach { (name, expected) ->
+                    val file = directory.resolve(name).apply { writeText("content") }
+                    val response = service.openFile(OpenFileRequest.newBuilder().setPath(file.absolutePath).build())
+                    assertTrue(response.success, name)
+                    assertEquals(expected, response.language, name)
+                }
+            } finally {
+                directory.deleteRecursively()
+            }
+        }
+
+    @Test
     fun `extension lookup is case-insensitive`() {
         assertEquals("kotlin", service.detectLanguage("KT"))
     }

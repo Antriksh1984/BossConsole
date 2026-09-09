@@ -9,8 +9,9 @@ package ai.rever.boss.plugin.language
  * hand-maintained copy. The two disagreed: this table names `.sh`/`.bash`/`.zsh` as
  * `bash`, the other as `shell`, and the other lacked more than forty ids this table
  * carries (`fortran`, `delphi`, `latex`, `lisp`, `tcl`, `clojure`, `batch`, `diff`, …).
- * Both now read from here, so a file cannot be reported as one language by one path and
- * a different one by another.
+ * Both now read from here. Consumers may keep protocol-specific defaults: the OOP
+ * editor uses `plaintext` for unknown files instead of [TEXT], and additionally
+ * recognizes protobuf files.
  *
  * This module is deliberately dependency-free: `boss-app-editor` compiles to a GraalVM
  * native image and has never depended on anything under `plugin-platform` before, so

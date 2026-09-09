@@ -19,7 +19,7 @@ class LanguageIdsTest {
     }
 
     @Test
-    fun `no name pattern and no extension disagree with themselves`() {
+    fun `shell extension aliases use the same language id`() {
         // sh/bash/zsh must resolve identically - this exact three-way split is the
         // disagreement that motivated #75 in the first place (this table said `bash`,
         // EditorServiceImpl's independent copy said `shell`, for the same three

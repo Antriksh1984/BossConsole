@@ -64,7 +64,7 @@ class EditorServiceImpl : EditorServiceGrpcKt.EditorServiceCoroutineImplBase() {
                     .newBuilder()
                     .setSuccess(true)
                     .setContent(content)
-                    .setLanguage(detectLanguage(file.extension))
+                    .setLanguage(languageForFile(file))
                     .build()
             } catch (e: Exception) {
                 logger.warn("openFile read failed: {}", e.message)
@@ -142,6 +142,12 @@ class EditorServiceImpl : EditorServiceGrpcKt.EditorServiceCoroutineImplBase() {
             }
         return ListOpenFilesResponse.newBuilder().addAllFiles(infos).build()
     }
+
+    // Filename rules take precedence even when a suffix is a known extension
+    // (Dockerfile.sh is a Dockerfile). Preserve this service's proto and unknown defaults.
+    private fun languageForFile(file: File): String =
+        LanguageIds.detect(file.name).takeUnless { it == LanguageIds.TEXT }
+            ?: detectLanguage(file.extension)
 
     /**
      * BossConsole#75: this used to be its own hand-maintained table, independent of
