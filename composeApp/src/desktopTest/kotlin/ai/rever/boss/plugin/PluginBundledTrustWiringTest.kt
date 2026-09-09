@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -14,7 +15,17 @@ class PluginBundledTrustWiringTest {
         return File(
             assertNotNull(root),
             "composeApp/src/desktopMain/kotlin/ai/rever/boss/plugin/PluginStoreSetup.kt",
-        ).readText().substringAfter("private fun copyBundledPluginsToPluginDir(")
+        ).readText().afterAnchor("private fun copyBundledPluginsToPluginDir(")
+    }
+
+    private fun String.afterAnchor(anchor: String): String {
+        assertTrue(contains(anchor), "missing source anchor: $anchor")
+        return substringAfter(anchor)
+    }
+
+    private fun String.beforeAnchor(anchor: String): String {
+        assertTrue(contains(anchor), "missing source anchor: $anchor")
+        return substringBefore(anchor)
     }
 
     @Test
@@ -22,13 +33,17 @@ class PluginBundledTrustWiringTest {
         val source = copySource()
         val directorySkip =
             source
-                .substringAfter("for (existingJar in existingJarsInPluginDir) {")
-                .substringBefore("break")
+                .afterAnchor("for (existingJar in existingJarsInPluginDir) {")
+                .beforeAnchor("if (shouldSkip) {")
         assertTrue(directorySkip.contains("PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)"))
+        assertFalse(
+            Regex("\\bbreak\\b").containsMatchIn(directorySkip),
+            "every duplicate must be considered before reconcile",
+        )
         val persistedSkip =
             source
-                .substringAfter("if (existingJarsInPluginDir.isEmpty() && existingPlugin != null) {")
-                .substringBefore("continue")
+                .afterAnchor("if (existingJarsInPluginDir.isEmpty() && existingPlugin != null) {")
+                .beforeAnchor("continue")
         assertTrue(persistedSkip.contains("PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)"))
     }
 
@@ -36,8 +51,8 @@ class PluginBundledTrustWiringTest {
     fun `fresh copies bind against source after copying`() {
         val afterCopy =
             copySource()
-                .substringAfter("jarFile.copyTo(destFile, overwrite = true)")
-                .substringBefore("PluginPersistence.addInstalledPlugin(")
+                .afterAnchor("jarFile.copyTo(destFile, overwrite = true)")
+                .beforeAnchor("PluginPersistence.addInstalledPlugin(")
         assertTrue(afterCopy.contains("PluginBundledTrust.bindToBundle(destFile.absolutePath, jarFile)"))
     }
 }

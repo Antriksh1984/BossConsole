@@ -237,4 +237,23 @@ class PluginJarReconcilerSidecarTest {
         assertFalse(jar.exists())
         assertFalse(File(PluginBundledTrust.pathFor(jar.absolutePath)).exists())
     }
+
+    @Test
+    fun `reconciliation keeps trust when it chooses the second identical copy`() {
+        val dir = tempPluginDir()
+        val id = "test.duplicate.bundle"
+        val first = manifestJar(dir, "first.jar", id, "1.0.0")
+        val second = first.copyTo(File(dir, "second.jar"))
+        assertTrue(first.setLastModified(1_000))
+        assertTrue(second.setLastModified(2_000))
+        // Startup must bind every matching candidate, not just the first skip decision.
+        listOf(first, second).forEach { PluginBundledTrust.bindToBundle(it.absolutePath, first) }
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(second), result.winners)
+        assertFalse(first.exists())
+        assertFalse(File(PluginBundledTrust.pathFor(first.absolutePath)).exists())
+        assertTrue(PluginBundledTrust.isTrusted(second.absolutePath))
+    }
 }

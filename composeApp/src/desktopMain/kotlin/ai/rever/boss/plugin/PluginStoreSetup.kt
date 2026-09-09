@@ -1689,7 +1689,7 @@ object PluginStoreSetup {
                         if (!isNewerVersion(bundledVersion, existingVersion)) {
                             // Older hosts copied these bytes without a provenance marker. Bind
                             // only an exact bundle match; store updates and side-loads stay untrusted.
-                            PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
+                            val bundledTrust = PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Found existing JAR with same/newer version - skipping",
@@ -1698,10 +1698,12 @@ object PluginStoreSetup {
                                     "bundledVersion" to bundledVersion,
                                     "existingVersion" to existingVersion,
                                     "existingJar" to existingJar.name,
+                                    "bundledTrust" to bundledTrust,
                                 ),
                             )
                             shouldSkip = true
-                            break
+                            // Keep checking: reconciliation can keep a different same-version
+                            // copy, so every byte-identical candidate needs its own marker.
                         }
                     }
                 }
@@ -1716,7 +1718,7 @@ object PluginStoreSetup {
                     if (existingJar.exists()) {
                         val existingManifest = readPluginManifest(existingJar)
                         if (existingManifest != null && !isNewerVersion(bundledVersion, existingManifest.version)) {
-                            PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
+                            val bundledTrust = PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Bundled plugin already installed with same/newer version - skipping",
@@ -1724,6 +1726,7 @@ object PluginStoreSetup {
                                     "pluginId" to pluginId,
                                     "bundledVersion" to bundledVersion,
                                     "installedVersion" to existingManifest.version,
+                                    "bundledTrust" to bundledTrust,
                                 ),
                             )
                             continue

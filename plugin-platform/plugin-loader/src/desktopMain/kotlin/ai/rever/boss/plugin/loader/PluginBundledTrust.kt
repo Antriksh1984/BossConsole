@@ -34,7 +34,7 @@ object PluginBundledTrust {
     fun pathFor(jarPath: String): String = "$jarPath$SUFFIX"
 
     /** Mark [jarPath]'s current bytes as trusted. Best-effort. */
-    fun markTrusted(
+    internal fun markTrusted(
         jarPath: String,
         sha256: String,
     ) {
@@ -65,6 +65,37 @@ object PluginBundledTrust {
                 LogCategory.SYSTEM,
                 "Could not establish bundled plugin trust",
                 mapOf("jarPath" to jarPath, "errorType" to error.javaClass.simpleName),
+            )
+        }.getOrDefault(false)
+
+    /** Preserve existing provenance across a snapshot/restore; never certify previously unbound bytes. */
+    fun copyTrust(
+        sourcePath: String,
+        destinationPath: String,
+    ): Boolean =
+        runCatching {
+            val marker = File(pathFor(sourcePath))
+            val recorded =
+                marker
+                    .takeIf { it.isFile }
+                    ?.readText()
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+            val matches =
+                recorded != null &&
+                    recorded == FileHashing.sha256(File(sourcePath)) &&
+                    recorded == FileHashing.sha256(File(destinationPath))
+            if (matches) {
+                File(pathFor(destinationPath)).writeText(requireNotNull(recorded))
+            } else {
+                delete(destinationPath)
+            }
+            matches
+        }.onFailure { error ->
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Could not preserve bundled plugin trust",
+                mapOf("jarPath" to destinationPath, "errorType" to error.javaClass.simpleName),
             )
         }.getOrDefault(false)
 

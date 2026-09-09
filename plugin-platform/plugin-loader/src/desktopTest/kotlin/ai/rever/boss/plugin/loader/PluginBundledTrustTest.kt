@@ -88,4 +88,18 @@ class PluginBundledTrustTest {
         assertFalse(PluginBundledTrust.bindToBundle(installed.absolutePath, installed))
         assertFalse(PluginBundledTrust.isTrusted(installed.absolutePath))
     }
+
+    @Test
+    fun `copying provenance rejects changed source or destination bytes`() {
+        val source = File(tempDir, "source.jar").apply { writeText("trusted") }
+        val destination = source.copyTo(File(tempDir, "snapshot.jar"))
+        PluginBundledTrust.bindToBundle(source.absolutePath, source)
+        assertTrue(PluginBundledTrust.copyTrust(source.absolutePath, destination.absolutePath))
+        destination.writeText("changed")
+        assertFalse(PluginBundledTrust.copyTrust(source.absolutePath, destination.absolutePath))
+        assertFalse(File(PluginBundledTrust.pathFor(destination.absolutePath)).exists())
+        source.writeText("changed")
+        assertFalse(PluginBundledTrust.copyTrust(source.absolutePath, destination.absolutePath))
+        assertFalse(PluginBundledTrust.isTrusted(destination.absolutePath))
+    }
 }
