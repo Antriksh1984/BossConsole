@@ -23,9 +23,10 @@ import kotlin.test.assertNull
  * Because they return lists the throw is all-or-nothing: not a missing field, an empty
  * panel, with only a WARN in the log to say why.
  *
- * Each case below carries the EXACT set of keys its RPC ships today, taken from the
- * `RETURNS TABLE` in `20260802000000_secrets_org_ownership.sql`, rather than a
- * representative unknown key. Two of these paths (`searchSecrets`, `getSecretShares`) were
+ * Each case below carries the top-level keys from the latest `RETURNS TABLE`: secret
+ * listings in `20260907000000_secrets_paging_tiebreaker.sql`, and shares in
+ * `20260802000000_secrets_org_ownership.sql`, rather than a representative unknown key.
+ * Two of these paths (`searchSecrets`, `getSecretShares`) were
  * broken in production without anyone reporting them, so "which shape did the server
  * actually send" is the thing worth pinning.
  *
@@ -59,11 +60,14 @@ class SecretDecodingTest {
     }
 
     /** The four keys `get_user_secrets` and `search_user_secrets` both gained. */
-    private fun JsonObjectBuilder.orgColumns(orgId: String?) {
+    private fun JsonObjectBuilder.orgColumns(
+        orgId: String?,
+        canManage: Boolean = true,
+    ) {
         put("org_id", orgId)
         put("org_slug", orgId?.let { "acme" })
         put("is_org_owned", orgId != null)
-        put("can_manage", true)
+        put("can_manage", canManage)
     }
 
     private fun userSecretsRow(
@@ -130,7 +134,7 @@ class SecretDecodingTest {
         assertEquals("acme", secrets[1].orgSlug)
         assertEquals(true, secrets[1].isOrgOwned)
         assertEquals(true, secrets[1].canManage)
-        // orgColumns always sends can_manage=true regardless of org ownership - canManageOrDeny
+        // These owned-secret rows send can_manage=true regardless of org ownership - canManageOrDeny
         // agrees with the raw column on this row shape; the null/absent case is covered by
         // `absent and explicit null organisation permissions stay unknown`.
         assertEquals(true, secrets[0].canManageOrDeny)
@@ -159,7 +163,8 @@ class SecretDecodingTest {
                         put("is_owner", false)
                         put("shared_by_email", "owner@example.com")
                         put("access_level", "read")
-                        orgColumns("66666666-6666-6666-6666-666666666666")
+                        // An ordinary member of the target org can read but cannot manage.
+                        orgColumns("66666666-6666-6666-6666-666666666666", canManage = false)
                         put("shared_with_org_slug", "partner-org")
                     },
                 )
@@ -175,7 +180,11 @@ class SecretDecodingTest {
         assertEquals("acme", secrets[0].orgSlug)
         assertEquals(true, secrets[0].isOrgOwned)
         assertEquals("partner-org", secrets[0].sharedWithOrgSlug)
-        assertEquals(true, secrets[0].canManage)
+        assertEquals(false, secrets[0].canManage)
+        assertFalse(secrets[0].canManageOrDeny)
+        val plain = secrets[0].toSecretEntry()
+        assertEquals(false, plain.canManage)
+        assertFalse(plain.canManageOrDeny)
     }
 
     @Test
