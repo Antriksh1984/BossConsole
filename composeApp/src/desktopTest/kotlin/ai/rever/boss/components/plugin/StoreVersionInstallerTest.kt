@@ -111,6 +111,7 @@ class StoreVersionInstallerTest {
         repository: PluginRepository = FakeRepository(),
         runningJarPath: String? = null,
         loadSucceeds: Boolean = true,
+        hasLiveInstance: Boolean = true,
     ) = install(
         store = repository,
         request =
@@ -119,6 +120,7 @@ class StoreVersionInstallerTest {
                 version = VERSION,
                 sourceUrl = "https://store.example/probe.jar",
                 runningJarPath = runningJarPath,
+                hasLiveInstance = hasLiveInstance,
             ),
         unload = { id ->
             unloaded += id
@@ -251,11 +253,30 @@ class StoreVersionInstallerTest {
         }
 
     @Test
+    fun `a refused browser installs immediately despite a newer refused artifact`() =
+        runTest {
+            val refused = File(dir, "running.jar").apply { writeText("refused bytes") }
+            val result =
+                installer(readManifestId = notHotReloadablePlugin, runningVersion = "9.0.0")
+                    .run(
+                        pluginId = notHotReloadablePlugin,
+                        runningJarPath = refused.absolutePath,
+                        hasLiveInstance = false,
+                    )
+
+            assertTrue(result.isSuccess)
+            assertEquals(listOf(notHotReloadablePlugin), unloaded)
+            assertEquals(1, loaded.size)
+            assertTrue(deferredNotices.isEmpty())
+        }
+
+    @Test
     fun `a deferred downgrade is refused because startup would select the newer live jar`() =
         runTest {
             val running = File(dir, "running.jar").apply { writeText("live bytes") }
-            val result = installer(readManifestId = notHotReloadablePlugin, runningVersion = "9.0.0")
-                .run(pluginId = notHotReloadablePlugin, runningJarPath = running.absolutePath)
+            val result =
+                installer(readManifestId = notHotReloadablePlugin, runningVersion = "9.0.0")
+                    .run(pluginId = notHotReloadablePlugin, runningJarPath = running.absolutePath)
 
             assertTrue(result.isFailure)
             assertTrue(running.exists())

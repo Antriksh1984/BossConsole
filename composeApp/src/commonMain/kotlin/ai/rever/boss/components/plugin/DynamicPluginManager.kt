@@ -1869,6 +1869,20 @@ class DynamicPluginManager(
         }
     }
 
+    private fun refuseHotReload(info: DynamicPluginInfo): Result<DynamicPluginInfo> {
+        val pluginId = info.manifest.pluginId
+        logger.info(
+            LogCategory.SYSTEM,
+            "Refusing to hot-reload - this plugin owns a native surface, restart BOSS instead",
+            mapOf("pluginId" to pluginId),
+        )
+        return Result.failure(
+            IllegalStateException(
+                "${info.manifest.displayName} cannot be hot-reloaded - restart BOSS to reload it",
+            ),
+        )
+    }
+
     /**
      * Reload a plugin from the newest known JAR, preserving its enabled state.
      *
@@ -1885,17 +1899,8 @@ class DynamicPluginManager(
         // every open surface unable to attach a view (BossConsole#71). Any update it needs has
         // already been staged for the next restart by the update path itself; reloading the
         // SAME bytes here gains nothing and only breaks the tabs it is currently showing.
-        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
-            logger.info(
-                LogCategory.SYSTEM,
-                "Refusing to hot-reload - this plugin owns a native surface, restart BOSS instead",
-                mapOf("pluginId" to pluginId),
-            )
-            return Result.failure(
-                IllegalStateException(
-                    "${info.manifest.displayName} cannot be hot-reloaded - restart BOSS to reload it",
-                ),
-            )
+        if (info.state == PluginState.LOADED && HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+            return refuseHotReload(info)
         }
 
         val wasEnabled = info.enabled

@@ -24,7 +24,7 @@ package ai.rever.boss.components.plugin
  */
 object HotReloadPolicy {
     /** `ai.rever.boss.plugin.dynamic.fluckbrowser` owns a JxBrowser native view - see the class doc. */
-    val NOT_HOT_RELOADABLE = setOf("ai.rever.boss.plugin.dynamic.fluckbrowser")
+    val NOT_HOT_RELOADABLE = setOf(TabTypePlugins.FLUCK_BROWSER)
 
     /** True when [pluginId] must defer any pending update/reload to a full restart. */
     fun requiresRestartInsteadOfHotReload(pluginId: String): Boolean = pluginId in NOT_HOT_RELOADABLE

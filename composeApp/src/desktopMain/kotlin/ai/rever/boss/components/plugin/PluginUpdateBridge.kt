@@ -5,12 +5,12 @@ import ai.rever.boss.downloads.DownloadCenter
 import ai.rever.boss.plugin.MissingDependencyReporter
 import ai.rever.boss.plugin.PluginPersistence
 import ai.rever.boss.plugin.PluginStoreSetup
-import ai.rever.boss.plugin.readDeferredPluginManifest
 import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.api.PluginUnloadIntent
 import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.api.TransferPhase
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
+import ai.rever.boss.plugin.readDeferredPluginManifest
 import ai.rever.boss.plugin.updater.UpdateInfo
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -109,7 +109,9 @@ actual object PluginUpdateBridge {
         // gates the dependent-restart question below: a deferred update never closes this
         // plugin's classloader, so nothing depending on it is affected either, and asking would
         // be a confusing prompt about an unload that is not going to happen.
-        val deferHotReload = HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
+        val deferHotReload =
+            manager.getPluginInfo(pluginId)?.state == PluginState.LOADED &&
+                HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
 
         // Ask before downloading anything. This path unloads with `force = true`, so it never
         // met the dependents veto - and never restarted the dependents either, which left them
@@ -139,7 +141,8 @@ actual object PluginUpdateBridge {
         //
         // Taken here rather than inside `mgr.updatePlugin` so it happens once, before the unload
         // closes the classloader, and so a failure to keep the copy cannot fail the update.
-        manager.getPluginInfo(pluginId)?.jarPath?.let { installedJar ->
+        val runningJarPath = manager.getPluginInfo(pluginId)?.jarPath
+        runningJarPath?.let { installedJar ->
             PluginRollbackStore.snapshot(pluginDir, pluginId, installedJar)
         }
 
@@ -155,7 +158,7 @@ actual object PluginUpdateBridge {
                         if (deferHotReload) Result.success(Unit) else manager.uninstallPlugin(id, force = true).map { }
                     },
                     loadPlugin = { path ->
-                        activateUpdate(pluginId, path, manager)
+                        activateUpdate(pluginId, path, manager, deferHotReload)
                     },
                     onProgress = { DownloadCenter.progress(pluginId, it) },
                     onInstalling = {
@@ -171,8 +174,7 @@ actual object PluginUpdateBridge {
             }
         return if (result.isSuccess) {
             PluginUpdateRegistry.clear(pluginId)
-            // Keep superseded artifacts until startup. A directory-wide reconcile here could
-            // delete a running browser JAR staged by an earlier update to a different plugin.
+            if (!deferHotReload) discardReplacedPluginJar(runningJarPath, targetPath)
             Result.success(update.newVersion)
         } else {
             discardIfUnswapped(swapStarted, targetFile)
@@ -180,17 +182,34 @@ actual object PluginUpdateBridge {
         }
     }
 
+    internal fun discardReplacedPluginJar(
+        previousPath: String?,
+        installedPath: String,
+    ) {
+        if (previousPath == null) return
+        val previous = File(previousPath)
+        runCatching {
+            val isDifferent = previous.canonicalFile != File(installedPath).canonicalFile
+            if (isDifferent && (!previous.exists() || previous.delete())) {
+                PluginSignatureSidecar.delete(previous.absolutePath)
+            }
+        }.onFailure { logger.warn(LogCategory.SYSTEM, "Could not remove superseded plugin artifact", error = it) }
+    }
+
     private suspend fun activateUpdate(
         pluginId: String,
         path: String,
         manager: DynamicPluginManager,
+        deferHotReload: Boolean,
     ): Result<Unit> =
-        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+        if (deferHotReload) {
             runCatching { stageForRestart(pluginId, path, manager) }
                 .onFailure { discardIfUnswapped(false, File(path)) }
         } else {
             manager.installPlugin(path).map { info ->
-                if (info.state == PluginState.LOADED) MissingDependencyReporter.forManager(manager).report(info.manifest)
+                if (info.state == PluginState.LOADED) {
+                    MissingDependencyReporter.forManager(manager).report(info.manifest)
+                }
             }
         }
 

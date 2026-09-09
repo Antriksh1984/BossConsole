@@ -6,7 +6,7 @@ import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.repository.PluginRepository
-import ai.rever.boss.utils.Version
+import ai.rever.boss.plugin.requireDeferredVersion
 import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -66,6 +66,7 @@ data class StoreVersionRequest(
     val version: String,
     val sourceUrl: String?,
     val runningJarPath: String?,
+    val hasLiveInstance: Boolean,
 )
 
 /**
@@ -166,14 +167,31 @@ internal class StoreVersionInstaller(
         target: File,
         declared: PluginManifest,
     ): Result<String> {
+        val valid =
+            runCatching {
+                requireDeferredVersion(
+                    declared,
+                    pluginDir()
+                        .listFiles()
+                        .orEmpty()
+                        .filter { it.isFile && it.extension == "jar" }
+                        .mapNotNull { hooks.readManifest(it.absolutePath) },
+                )
+            }
+        if (valid.isFailure) {
+            hooks.discardFiles(target.absolutePath)
+            return failure(valid.exceptionOrNull()?.message ?: "Cannot stage this version for restart.")
+        }
+        return persistDeferred(request, target, declared)
+    }
+
+    private fun persistDeferred(
+        request: StoreVersionRequest,
+        target: File,
+        declared: PluginManifest,
+    ): Result<String> {
         val pluginId = request.pluginId
         val version = request.version
-        // Startup reconciliation keeps the highest version. Do not report a downgrade as
-        // staged when retaining the newer live artifact means it will win again at restart.
-        if (hasNewerArtifact(declared)) {
-            hooks.discardFiles(target.absolutePath)
-            return failure("Cannot stage an older browser version while a newer version remains installed.")
-        }
         val persisted =
             runCatching { hooks.persist(pluginId, target.absolutePath, declared.version, request.sourceUrl) }
         if (persisted.isFailure) {
@@ -192,16 +210,6 @@ internal class StoreVersionInstaller(
         )
         hooks.notifyDeferred(declared.displayName)
         return Result.success(declared.version)
-    }
-
-    private fun hasNewerArtifact(declared: PluginManifest): Boolean {
-        val selected = Version.parse(declared.version) ?: Version(0, 0, 0)
-        return pluginDir().listFiles().orEmpty().any { file ->
-            if (!file.isFile || file.extension != "jar") return@any false
-            val candidate = hooks.readManifest(file.absolutePath)
-            candidate?.pluginId == declared.pluginId &&
-                (Version.parse(candidate.version) ?: Version(0, 0, 0)) > selected
-        }
     }
 
     /**
@@ -241,7 +249,7 @@ internal class StoreVersionInstaller(
         // next restart instead of touching the running instance. The old jar is deliberately
         // left in place too (unlike the normal path below, which lets PluginJarReconciler clean
         // it up next launch): the still-running classloader still has it open.
-        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+        if (request.hasLiveInstance && HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
             return stageForRestart(request, target, declared)
         }
 

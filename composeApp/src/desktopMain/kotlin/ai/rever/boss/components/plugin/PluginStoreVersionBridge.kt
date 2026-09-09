@@ -130,6 +130,7 @@ actual object PluginStoreVersionBridge {
                             version = version,
                             sourceUrl = sourceUrl,
                             runningJarPath = manager.getPluginInfo(pluginId)?.jarPath,
+                            hasLiveInstance = manager.getPluginInfo(pluginId)?.state == PluginState.LOADED,
                         ),
                     unload = { id -> manager.uninstallPlugin(id, force = true).map { } },
                     load = { path ->

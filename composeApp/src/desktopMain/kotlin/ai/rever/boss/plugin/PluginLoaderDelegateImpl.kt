@@ -465,8 +465,10 @@ class PluginLoaderDelegateImpl(
             // every future) surface unable to attach a view. Defer to the next cold start instead:
             // the safe half of a reload still happens (the new bytes are on disk and
             // installed.json points at them), only the live swap does not.
-            if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
-                deferReloadToRestart(pluginId, jarPath)
+            if (dynamicPluginManager.getPluginInfo(pluginId)?.state == PluginState.LOADED &&
+                HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
+            ) {
+                withContext(Dispatchers.IO) { deferReloadToRestart(pluginId, jarPath, loadedJarPath) }
                 return dynamicPluginManager.getPluginInfo(pluginId)?.let(::toLoadedPluginInfo)
             }
 
@@ -494,7 +496,12 @@ class PluginLoaderDelegateImpl(
     private fun deferReloadToRestart(
         pluginId: String,
         jarPath: String,
+        loadedJarPath: String?,
     ) {
+        if (jarPath == loadedJarPath) {
+            StatusMessageManager.showMessage("Restart BOSS to reload this plugin", durationMs = 5000)
+            return
+        }
         val manifest = readDeferredPluginManifest(pluginId, jarPath)
         val existing = PluginPersistence.getInstalledPlugin(pluginId)
         PluginPersistence.addInstalledPlugin(
