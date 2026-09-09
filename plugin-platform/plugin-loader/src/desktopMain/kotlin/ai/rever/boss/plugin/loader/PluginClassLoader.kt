@@ -368,18 +368,13 @@ class PluginClassLoader(
      * loader is unloading or closed the same delegation becomes destructive, so
      * it is refused instead; see the comment in the catch block.
      *
-     * The two post-ACTIVE states are refused for different reasons, and only one
-     * of them is load-bearing for the LinkageError this exists to prevent:
-     * - [ClassLoaderState.UNLOADED] — CORRECTNESS. The jar is shut, `findClass`
-     *   misses on every name including ones the plugin owns, so delegating
-     *   splices the host's class graph into the plugin's.
-     * - [ClassLoaderState.UNLOAD_IN_PROGRESS] — POLICY. The jar is still open
-     *   here, so a miss is a genuine miss and delegating could not corrupt
-     *   anything. It is refused anyway as fail-fast on a lifecycle bug: the
-     *   plugin's own `dispose()` has already returned by the time this state is
-     *   set (see `DynamicPluginLoader.unloadPlugin`), so a first-time load in
-     *   this window is a straggler that would be refused a moment later anyway
-     *   once `close()` lands. One rule beats two.
+     * Both post-ACTIVE states must refuse parent fallback:
+     * - [ClassLoaderState.UNLOADED]: the jar is shut, so `findClass` misses even on names
+     *   the plugin owns. Delegation would splice the host's class graph into the plugin's.
+     * - [ClassLoaderState.UNLOAD_IN_PROGRESS]: before close this is fail-fast policy for
+     *   straggler work after teardown. The state also covers resource closure itself, when
+     *   JAR reads may already fail; refusal then protects class-graph correctness as well.
+     *   Do not relax this branch on the assumption that the jar is still open.
      */
     private fun loadClassChildFirst(
         name: String,
@@ -519,6 +514,9 @@ class PluginClassLoader(
 
     /**
      * Close this classloader and release resources.
+     * Keep UNLOAD_IN_PROGRESS across super.close(): the reconciler uses that state to retain
+     * the JAR while its resources are closing. Publish UNLOADED only afterwards, in finally,
+     * so a throwing close does not permanently pin the file. Both states refuse parent fallback.
      */
     override fun close() {
         markUnloading()

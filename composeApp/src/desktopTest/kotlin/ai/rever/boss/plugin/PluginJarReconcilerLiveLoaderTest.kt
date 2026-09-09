@@ -140,6 +140,7 @@ class PluginJarReconcilerLiveLoaderTest {
     fun `a superseded dependency URL is retained even when it is not the entry jar`() {
         val dir = tempPluginDir()
         val entry = manifestJar(dir, "entry.jar", "com.example.entry", "1.0.0")
+        // The manifest makes this URL a reconciler candidate; ordinary library dependencies need no manifest.
         val older = manifestJar(dir, "dependency-1.jar", "com.example.dependency", "1.0.0")
         manifestJar(dir, "dependency-2.jar", "com.example.dependency", "2.0.0")
         val loader = openLoaderOver(entry, older)
