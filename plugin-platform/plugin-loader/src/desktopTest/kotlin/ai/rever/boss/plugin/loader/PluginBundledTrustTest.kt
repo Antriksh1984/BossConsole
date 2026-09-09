@@ -62,4 +62,30 @@ class PluginBundledTrustTest {
         File(PluginBundledTrust.pathFor(jar.absolutePath)).writeText("   ")
         assertFalse(PluginBundledTrust.isTrusted(jar.absolutePath))
     }
+    @Test
+    fun `an older installed copy gains trust without being overwritten`() {
+        val source = File(tempDir, "bundle.jar").apply { writeText("trusted-bytes") }
+        val installed = source.copyTo(File(tempDir, "old-host-copy.jar"))
+        assertFalse(PluginBundledTrust.isTrusted(installed.absolutePath))
+        assertTrue(PluginBundledTrust.bindToBundle(installed.absolutePath, source))
+        assertTrue(PluginBundledTrust.isTrusted(installed.absolutePath))
+    }
+
+    @Test
+    fun `binding never trusts different installed bytes`() {
+        val source = File(tempDir, "bundle.jar").apply { writeText("trusted-bytes") }
+        val installed = File(tempDir, "installed.jar").apply { writeText("changed-bytes") }
+        assertFalse(PluginBundledTrust.bindToBundle(installed.absolutePath, source))
+        assertFalse(PluginBundledTrust.isTrusted(installed.absolutePath))
+    }
+
+    @Test
+    fun `missing bundle and unwritable marker cannot establish trust`() {
+        val installed = File(tempDir, "installed.jar").apply { writeText("trusted-bytes") }
+        assertFalse(PluginBundledTrust.bindToBundle(installed.absolutePath, File(tempDir, "missing.jar")))
+        File(PluginBundledTrust.pathFor(installed.absolutePath)).mkdir()
+        assertFalse(PluginBundledTrust.bindToBundle(installed.absolutePath, installed))
+        assertFalse(PluginBundledTrust.isTrusted(installed.absolutePath))
+    }
+
 }

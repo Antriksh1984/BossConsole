@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -170,11 +171,15 @@ class PluginJarReconcilerSidecarTest {
         val newer = manifestJar(dir, "test-plugin-2.0.0.jar", pluginId, "2.0.0")
         PluginSignatureSidecar.write(older.absolutePath, "b2xkLXNpZw==")
         PluginSignatureSidecar.write(newer.absolutePath, "bmV3LXNpZw==")
+        PluginBundledTrust.bindToBundle(older.absolutePath, older)
+        PluginBundledTrust.bindToBundle(newer.absolutePath, newer)
 
         val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
 
         assertTrue(result.deleted.contains(older.name), "expected the older JAR to be reconciled away")
         assertFalse(older.exists(), "older JAR should be gone")
+        assertFalse(File(PluginBundledTrust.pathFor(older.absolutePath)).exists())
+        assertTrue(PluginBundledTrust.isTrusted(newer.absolutePath))
         assertFalse(
             File(PluginSignatureSidecar.pathFor(older.absolutePath)).exists(),
             "the losing JAR's sidecar must not survive it",
@@ -200,4 +205,36 @@ class PluginJarReconcilerSidecarTest {
             "nothing was deleted, so nothing should have been unsigned",
         )
     }
+    @Test
+    fun `retiring a formerly bundled plugin removes its trust marker`() {
+        val dir = tempPluginDir()
+        val id = "test.formerly.bundled"
+        val jar = manifestJar(dir, "former-bundle.jar", id, "1.0.0")
+        PluginBundledTrust.bindToBundle(jar.absolutePath, jar)
+        assertTrue(PluginBundledTrust.isTrusted(jar.absolutePath))
+
+        assertTrue(purgeJarsFor(id, dir, manifestIdOf = { id }))
+        assertFalse(jar.exists())
+        assertFalse(File(PluginBundledTrust.pathFor(jar.absolutePath)).exists())
+    }
+
+    @Test
+    fun `uninstall removes bundled trust with the jar without touching persistence`() {
+        val dir = tempPluginDir()
+        val id = "test.uninstall.bundled"
+        val jar = manifestJar(dir, "uninstall-bundle.jar", id, "1.0.0")
+        PluginBundledTrust.bindToBundle(jar.absolutePath, jar)
+        var forgotten: String? = null
+
+        PluginArtifactCleanup.remove(
+            id,
+            jar.absolutePath,
+            PluginArtifactCleanup.Hooks(forgetRow = { forgotten = it }),
+        )
+
+        assertEquals(id, forgotten)
+        assertFalse(jar.exists())
+        assertFalse(File(PluginBundledTrust.pathFor(jar.absolutePath)).exists())
+    }
+
 }

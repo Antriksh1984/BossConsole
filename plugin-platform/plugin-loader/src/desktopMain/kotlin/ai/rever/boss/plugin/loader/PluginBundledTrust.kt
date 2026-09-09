@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.loader
 
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import java.io.File
 
 /**
@@ -18,12 +20,15 @@ import java.io.File
  * filename (a stale reconciler leftover, a manual side-load, a store update reusing the name)
  * must NOT inherit trust it was never given.
  *
- * Written ONLY by `PluginStoreSetup`'s bundled-copy step, immediately after copying FROM the
- * trusted bundled directory - nothing else in this codebase writes it, and nothing a plugin's own
- * bytes can do forges it, since the marker binds the exact digest the host just computed off its
- * own trusted copy.
+ * The host binds copies (including copies installed by older hosts) by comparing against the
+ * bundled source, never by trusting a manifest id or version. This is a local provenance cache,
+ * not a cryptographic credential: a process able to write both the JAR and its marker can forge
+ * it. As with the app bundle and development directory override, local filesystem integrity is
+ * outside the store/DB-substitution threat model.
  */
 object PluginBundledTrust {
+    private val logger = BossLogger.forComponent("PluginBundledTrust")
+
     private const val SUFFIX = ".bundled-trust"
 
     fun pathFor(jarPath: String): String = "$jarPath$SUFFIX"
@@ -35,6 +40,33 @@ object PluginBundledTrust {
     ) {
         runCatching { File(pathFor(jarPath)).writeText(sha256) }
     }
+
+    /**
+     * Bind an installed copy to trusted bundled bytes, including when startup skips copying an
+     * already-installed version. A matching id/version alone never grants the exemption.
+     * Returns false if either file cannot be read, differs, or the marker cannot be written.
+     * Read/write failures are logged; a differing store update is an ordinary non-match.
+     * A partial marker write fails closed: no exemption until a subsequent startup retries.
+     */
+    fun bindToBundle(
+        jarPath: String,
+        bundledJar: File,
+    ): Boolean =
+        runCatching {
+            val bundledDigest = FileHashing.sha256(bundledJar)
+            if (FileHashing.sha256(File(jarPath)) != bundledDigest) {
+                false
+            } else {
+                File(pathFor(jarPath)).writeText(bundledDigest)
+                true
+            }
+        }.onFailure { error ->
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Could not establish bundled plugin trust",
+                mapOf("jarPath" to jarPath, "errorType" to error.javaClass.simpleName),
+            )
+        }.getOrDefault(false)
 
     /**
      * Whether [jarPath]'s CURRENT bytes match a marker this object wrote for them.

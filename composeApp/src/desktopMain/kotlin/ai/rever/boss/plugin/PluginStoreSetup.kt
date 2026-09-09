@@ -2,7 +2,6 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
-import ai.rever.boss.plugin.loader.FileHashing
 import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
@@ -1688,6 +1687,9 @@ object PluginStoreSetup {
                             highestExistingVersion = existingVersion
                         }
                         if (!isNewerVersion(bundledVersion, existingVersion)) {
+                            // Older hosts copied these bytes without a provenance marker. Bind
+                            // only an exact bundle match; store updates and side-loads stay untrusted.
+                            PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Found existing JAR with same/newer version - skipping",
@@ -1714,6 +1716,7 @@ object PluginStoreSetup {
                     if (existingJar.exists()) {
                         val existingManifest = readPluginManifest(existingJar)
                         if (existingManifest != null && !isNewerVersion(bundledVersion, existingManifest.version)) {
+                            PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Bundled plugin already installed with same/newer version - skipping",
@@ -1800,13 +1803,14 @@ object PluginStoreSetup {
 
                 jarFile.copyTo(destFile, overwrite = true)
 
-                // Mark these exact bytes trusted (BossConsole#102): this copy IS the
-                // bundled JAR's provenance check — it just came from the signed,
-                // notarized app image — so record it here rather than re-deriving
-                // "was this a bundled load" later, once the file is indistinguishable
-                // from any other JAR sitting in the plugin directory.
-                runCatching {
-                    PluginBundledTrust.markTrusted(destFile.absolutePath, FileHashing.sha256(destFile))
+                // Anchor trust to the bundled source, not whatever happens to occupy the
+                // writable destination after copying. A later replacement invalidates the marker.
+                if (!PluginBundledTrust.bindToBundle(destFile.absolutePath, jarFile)) {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not bind copied plugin to bundled bytes",
+                        mapOf("pluginId" to pluginId, "jarPath" to destFile.absolutePath),
+                    )
                 }
 
                 logger.info(

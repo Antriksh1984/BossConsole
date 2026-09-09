@@ -234,4 +234,33 @@ class LoadTimeSignatureVerificationTest {
             val result = testLoader().loadPlugin(jar.absolutePath)
             assertIs<PluginSignatureException>(result.exceptionOrNull())
         }
+    @Test
+    fun `an existing bundled copy passes enforcement after source binding`() =
+        runBlocking<Unit> {
+            val source = manifestJar("com.example.sig.upgrade", "1.0.0")
+            val installed = File.createTempFile("sig-upgrade", ".jar")
+            tempFiles.add(installed)
+            tempFiles.add(File(PluginBundledTrust.pathFor(installed.absolutePath)))
+            source.copyTo(installed, overwrite = true)
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            System.setProperty("boss.dev.mode", "false")
+            assertIs<PluginSignatureException>(testLoader().loadPlugin(installed.absolutePath).exceptionOrNull())
+
+            PluginBundledTrust.bindToBundle(installed.absolutePath, source)
+            assertIs<PluginClassException>(testLoader().loadPlugin(installed.absolutePath).exceptionOrNull())
+        }
+
+    @Test
+    fun `bundled trust never overrides an invalid store signature`() =
+        runBlocking<Unit> {
+            val jar = manifestJar("com.example.sig.bundled.invalid", "1.0.0")
+            tempFiles.add(File(PluginBundledTrust.pathFor(jar.absolutePath)))
+            tempFiles.add(File(PluginSignatureSidecar.pathFor(jar.absolutePath)))
+            PluginBundledTrust.bindToBundle(jar.absolutePath, jar)
+            PluginSignatureSidecar.write(jar.absolutePath, "invalid-signature")
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            System.setProperty("boss.dev.mode", "false")
+            assertIs<PluginSignatureException>(testLoader().loadPlugin(jar.absolutePath).exceptionOrNull())
+        }
+
 }
