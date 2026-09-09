@@ -76,6 +76,29 @@ class SecretDecodingTest {
         }
 
     @Test
+    fun `absent and explicit null organisation permissions stay unknown`() {
+        for (includeNulls in listOf(false, true)) {
+            val payload =
+                buildJsonObject {
+                    baseSecret("secret-id")
+                    put("is_owner", false)
+                    put("access_level", "read")
+                    if (includeNulls) {
+                        put("can_manage", null as Boolean?)
+                        put("is_org_owned", null as Boolean?)
+                    }
+                }
+            val plain = supabaseJson.decodeFromJsonElement<SecretEntry>(payload)
+            val shared = supabaseJson.decodeFromJsonElement<SecretEntryWithSharing>(payload)
+            assertNull(plain.canManage)
+            assertNull(plain.isOrgOwned)
+            assertNull(shared.canManage)
+            assertNull(shared.isOrgOwned)
+            assertNull(shared.toSecretEntry().canManage)
+        }
+    }
+
+    @Test
     fun `get_user_secrets decodes with its four new organisation columns`() {
         val payload =
             buildJsonArray {
@@ -127,7 +150,7 @@ class SecretDecodingTest {
                         put("shared_by_email", "owner@example.com")
                         put("access_level", "read")
                         orgColumns("66666666-6666-6666-6666-666666666666")
-                        put("shared_with_org_slug", "acme")
+                        put("shared_with_org_slug", "partner-org")
                     },
                 )
             }
@@ -141,7 +164,7 @@ class SecretDecodingTest {
         assertEquals("66666666-6666-6666-6666-666666666666", secrets[0].orgId)
         assertEquals("acme", secrets[0].orgSlug)
         assertEquals(true, secrets[0].isOrgOwned)
-        assertEquals("acme", secrets[0].sharedWithOrgSlug)
+        assertEquals("partner-org", secrets[0].sharedWithOrgSlug)
         assertEquals(true, secrets[0].canManage)
     }
 
@@ -162,7 +185,7 @@ class SecretDecodingTest {
                         put("shared_by_email", null as String?)
                         put("access_level", "org")
                         orgColumns("dddddddd-dddd-dddd-dddd-dddddddddddd")
-                        put("shared_with_org_slug", null as String?)
+                        put("shared_with_org_slug", "acme")
                     },
                 )
             }
@@ -177,6 +200,12 @@ class SecretDecodingTest {
         // but IS allowed to manage it - can_manage is what a UI must gate edit/delete on.
         assertEquals(true, orgSecret.canManage)
         assertEquals(true, orgSecret.isOrgOwned)
+        assertEquals("acme", orgSecret.sharedWithOrgSlug)
+        val plain = orgSecret.toSecretEntry()
+        assertEquals(orgSecret.orgId, plain.orgId)
+        assertEquals(orgSecret.orgSlug, plain.orgSlug)
+        assertEquals(orgSecret.isOrgOwned, plain.isOrgOwned)
+        assertEquals(orgSecret.canManage, plain.canManage)
     }
 
     @Test

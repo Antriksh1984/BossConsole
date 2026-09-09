@@ -181,11 +181,10 @@ data class SecretEntryWithSharing(
     val orgSlug: String? = null,
     @SerialName("is_org_owned")
     val isOrgOwned: Boolean? = null,
-    // Distinct from orgId/orgSlug above: this is the org a PERSONAL secret was shared TO, not
-    // the org that OWNS it - the two are mutually exclusive in the RPC's own UNION (a row is
-    // either "this secret's own org-ownership" or "shared to me via my org membership", never
-    // both), but nothing stops a future migration changing that, so they stay separate fields
-    // rather than one reused for both meanings.
+    // The owning org's slug for access_level="org" (source 4), or the target org's
+    // slug for an org share (source 5). It can equal orgSlug; the fields are not exclusive.
+    // A creator's org-owned secret has access_level="owner", so use isOrgOwned to
+    // identify org ownership rather than testing accessLevel == "org".
     @SerialName("shared_with_org_slug")
     val sharedWithOrgSlug: String? = null,
     @SerialName("can_manage")
