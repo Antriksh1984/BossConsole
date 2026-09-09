@@ -123,6 +123,28 @@ class RemoteSurfaceInputComposeTest {
     }
 
     @Test
+    fun `an opted out replacement rejects keys from the still composed opted in renderer`() {
+        val registry = RemoteUiSurfaceRegistry()
+        val original = registry.accept(PANEL, wantsKeys = true)
+        val panel = RemotePanelComponent(PANEL, "Test Panel", PROCESS, registry)
+        original.pushTree(textFieldTree())
+        panel.attach()
+        assertUnboundInLiveKeymap()
+        compose.setContent { panel.Content() }
+        compose.onNode(hasSetTextAction()).requestFocus()
+
+        // Reclaim a registration that has not opened its stream. No tree or connection callback
+        // has refreshed the existing composition, but events now route to the replacement queue.
+        val replacement = registry.accept(PANEL)
+        compose.onRoot().performKeyInput {
+            withKeyDown(Key.AltLeft) { withKeyDown(Key.ShiftLeft) { pressKey(Key.F7) } }
+        }
+        compose.waitForIdle()
+        assertNoKeyReachesThePlugin(replacement)
+        panel.dispose()
+    }
+
+    @Test
     fun `a key the focused widget consumes never reaches the plugin`() {
         // "The focused widget gets first refusal" is the property that keeps ordinary typing off the
         // wire — a text field consumes its character keys, so a plugin sees one TextChange per edit

@@ -192,9 +192,12 @@ class RemoteUiSurface internal constructor(
      * mean either blocking the frame or handing the event to a coroutine that can be reordered against
      * its neighbours.
      *
-     * @return `false` when the surface is closed — a late event is dropped, never thrown at the caller.
+     * @return `false` when the surface is closed or a key was not requested.
      */
     internal fun emit(event: UIEvent): Boolean {
+        // A composed renderer can still hold the previous registration's capability until its next
+        // callback/recomposition. Enforce the receiving registration's immutable policy at enqueue.
+        if (event.hasKey() && !descriptor.wantsKeys) return false
         if (outgoing.trySend(event).isFailure) return false
         // DROP_OLDEST evicts inside the channel, so overflow has to be inferred from outside it: the
         // buffer cannot hold more than its capacity, so a count above it means this send probably

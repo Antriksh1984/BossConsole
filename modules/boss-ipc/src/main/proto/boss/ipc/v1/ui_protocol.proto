@@ -76,15 +76,12 @@ message UIRegistration {
   // For panels: default slot position
   string default_slot = 7;     // e.g., "left.top.top", "right.top.bottom"
 
-  // Whether this surface may receive KeyEvent (unclaimed keys - see KeyEvent's own doc for what
-  // "unclaimed" means). False (the default, and every existing plugin's unset value) means the
-  // surface never becomes a focus target of its own and never receives one, matching the behavior
-  // every remote surface had before this field existed - additive, not a behavior change for a
-  // plugin built against an older host. A plugin whose widget tree has no interactive content and
-  // no reason to see raw key presses should leave this false even if it could set it: fewer
-  // capabilities declared is less for a reviewer, and a future host security prompt, to reason
-  // about. See KeyEvent and the host's Modifier.forwardUnclaimedKeys for the full policy this
-  // gates.
+  // Opt in to unclaimed KeyEvent delivery while an interactive child holds focus.
+  // False by default, including registrations from older plugins that omit this field.
+  // This is wire-compatible but changes behavior: older plugins must opt in to retain raw
+  // key delivery. Neither value makes the surface root a focus target. Widget events such as
+  // TextChange still work without this flag. This is a plugin declaration, not user consent;
+  // it does not add a permission prompt or protect against a plugin deliberately opting in.
   bool wants_keys = 8;
 }
 

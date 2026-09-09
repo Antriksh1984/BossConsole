@@ -1,5 +1,6 @@
 package ai.rever.boss.components.plugin.remote
 
+import ai.rever.boss.kernel.ui.RemoteUiSurfaceDescriptor
 import ai.rever.boss.kernel.ui.RemoteUiSurfaceHost
 import ai.rever.boss.kernel.ui.RemoteUiSurfaceRegistry
 import ai.rever.boss.ui.sdk.UIEventMapper
@@ -26,15 +27,9 @@ internal class RemoteSurfaceComponent(
 
     /**
      * Whether the plugin behind this surface declared [RemoteUiSurfaceDescriptor.wantsKeys].
-     * Read opportunistically off the registry rather than carried through a new
-     * [RemoteUiSurfaceHost] callback: the descriptor is immutable for a surface's whole lifetime, so
-     * there is nothing to keep in sync once read, and by the time either existing callback fires at
-     * least once the registration [registry].[RemoteUiSurfaceRegistry.surfaceOf] would read is
-     * already there - [RemoteUiSurfaceRegistry.attach]'s replay always calls
-     * [RemoteUiSurfaceHost.onConnectionChanged] (even with `false`) once the surface is registered,
-     * and [RemoteUiSurfaceHost.onTreeUpdated] never fires before it either. Stays at its safe
-     * `false` default for the entire window before either callback, matching every other "nothing
-     * has told us yet" state this component starts in.
+     * Refreshed on tree/connection delivery. This snapshot only controls the renderer's tap;
+     * a same-owner replacement can precede its next callback or recomposition. The receiving
+     * surface also checks its own immutable descriptor when enqueueing keys.
      */
     private val _wantsKeys = mutableStateOf(false)
 
@@ -57,7 +52,7 @@ internal class RemoteSurfaceComponent(
             }
         }
 
-    /** Re-read [RemoteUiSurfaceDescriptor.wantsKeys] off the registry; a no-op before registration. */
+    /** Re-read [RemoteUiSurfaceDescriptor.wantsKeys] off the registry; false before registration. */
     private fun refreshWantsKeys() {
         _wantsKeys.value = registry.surfaceOf(surfaceId)?.descriptor?.wantsKeys == true
     }
@@ -135,7 +130,7 @@ internal class RemoteSurfaceComponent(
         if (!registry.emit(surfaceId, proto)) {
             logger.debug(
                 LogCategory.UI,
-                "Dropped UI event: no plugin holds this surface",
+                "Dropped UI event: surface unavailable or capability not declared",
                 mapOf("surfaceId" to surfaceId),
             )
         }
