@@ -419,7 +419,9 @@ jobs:
         run: python3 scripts/test/prepare-totp-migration-fixtures.py
 
       - name: 🧪 Run pgTAP RBAC tests
-        run: supabase test db
+        run: |
+          python3 scripts/test/prepare-rotation-test.py
+          supabase test db
 
       - name: Verify BOSS AI admission across PostgreSQL sessions
         timeout-minutes: 2
