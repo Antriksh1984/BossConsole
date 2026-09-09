@@ -62,6 +62,7 @@ class PluginBundledTrustTest {
         File(PluginBundledTrust.pathFor(jar.absolutePath)).writeText("   ")
         assertFalse(PluginBundledTrust.isTrusted(jar.absolutePath))
     }
+
     @Test
     fun `an older installed copy gains trust without being overwritten`() {
         val source = File(tempDir, "bundle.jar").apply { writeText("trusted-bytes") }
@@ -87,5 +88,4 @@ class PluginBundledTrustTest {
         assertFalse(PluginBundledTrust.bindToBundle(installed.absolutePath, installed))
         assertFalse(PluginBundledTrust.isTrusted(installed.absolutePath))
     }
-
 }

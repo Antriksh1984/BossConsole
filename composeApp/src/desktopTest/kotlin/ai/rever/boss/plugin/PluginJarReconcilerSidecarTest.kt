@@ -205,6 +205,7 @@ class PluginJarReconcilerSidecarTest {
             "nothing was deleted, so nothing should have been unsigned",
         )
     }
+
     @Test
     fun `retiring a formerly bundled plugin removes its trust marker`() {
         val dir = tempPluginDir()
@@ -236,5 +237,4 @@ class PluginJarReconcilerSidecarTest {
         assertFalse(jar.exists())
         assertFalse(File(PluginBundledTrust.pathFor(jar.absolutePath)).exists())
     }
-
 }

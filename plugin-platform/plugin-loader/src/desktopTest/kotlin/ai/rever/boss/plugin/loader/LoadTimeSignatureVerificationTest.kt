@@ -234,6 +234,7 @@ class LoadTimeSignatureVerificationTest {
             val result = testLoader().loadPlugin(jar.absolutePath)
             assertIs<PluginSignatureException>(result.exceptionOrNull())
         }
+
     @Test
     fun `an existing bundled copy passes enforcement after source binding`() =
         runBlocking<Unit> {
@@ -262,5 +263,4 @@ class LoadTimeSignatureVerificationTest {
             System.setProperty("boss.dev.mode", "false")
             assertIs<PluginSignatureException>(testLoader().loadPlugin(jar.absolutePath).exceptionOrNull())
         }
-
 }
