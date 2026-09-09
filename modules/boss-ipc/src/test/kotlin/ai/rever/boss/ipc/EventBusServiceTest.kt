@@ -216,7 +216,19 @@ class EventBusServiceTest {
                             },
                         ).build()
 
-                stub.publishBatch(batchRequest)
+                // awaitSubscriberRegistered() is the weaker guard the class doc warns about: the RPC
+                // handler having run is still ahead of the flow actually being collected, and this
+                // batch - unlike the single-event tests - cannot use publishUntilDelivered's
+                // republish-until-the-subscriber-reacts pattern verbatim, since republishing an
+                // already-arriving batch would inflate the count this test asserts exactly. Republish
+                // the whole batch only while NOTHING has arrived yet: a truly-missed publish (the
+                // MutableSharedFlow has no replay) means all three were lost together, so resending
+                // then cannot double a partial delivery - which is what actually reproduced this
+                // flake on the Windows CI runner (the slowest leg, same as the class doc's history).
+                while (received.isEmpty() && subscriberJob.isActive) {
+                    stub.publishBatch(batchRequest)
+                    delay(POLL_MS)
+                }
 
                 // Wait for the three, rather than sleeping long enough that they have probably arrived. The
                 // enclosing withTimeout is the bound if they never do, so a real failure reports as a
