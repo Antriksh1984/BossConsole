@@ -5,6 +5,7 @@ import ai.rever.boss.downloads.DownloadCenter
 import ai.rever.boss.plugin.MissingDependencyReporter
 import ai.rever.boss.plugin.PluginPersistence
 import ai.rever.boss.plugin.PluginStoreSetup
+import ai.rever.boss.plugin.readDeferredPluginManifest
 import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.api.PluginUnloadIntent
 import ai.rever.boss.plugin.api.TransferKind
@@ -115,7 +116,9 @@ actual object PluginUpdateBridge {
         // holding a handle into the classloader this update is about to close. Asked here rather
         // than inside `updatePlugin`'s unload lambda so a decline costs no download, and so the
         // question arrives before the "Updating…" status message stops making sense.
-        if (!deferHotReload && !confirmDependentRestart(pluginId, update.displayName, PluginUnloadIntent.UPDATE, manager)) {
+        if (!deferHotReload &&
+            !confirmDependentRestart(pluginId, update.displayName, PluginUnloadIntent.UPDATE, manager)
+        ) {
             return Result.failure(DependentRestartDeclinedException(pluginId))
         }
 
@@ -140,8 +143,6 @@ actual object PluginUpdateBridge {
             PluginRollbackStore.snapshot(pluginDir, pluginId, installedJar)
         }
 
-        val reporter = MissingDependencyReporter.forManager(manager)
-
         val ownsTransfer = beginTransfer(pluginId, update, currentCoroutineContext()[Job])
         // Set from `onInstalling`; see discardPartialDownload for what it gates.
         var swapStarted = false
@@ -154,18 +155,7 @@ actual object PluginUpdateBridge {
                         if (deferHotReload) Result.success(Unit) else manager.uninstallPlugin(id, force = true).map { }
                     },
                     loadPlugin = { path ->
-                        if (deferHotReload) {
-                            stageForRestart(pluginId, path, manager)
-                            Result.success(Unit)
-                        } else {
-                            manager.installPlugin(path).map { info ->
-                                // An update can add a dependency the installed version never declared,
-                                // and this path does not go through PluginLoaderDelegateImpl. Only for a
-                                // plugin that actually registered: `installPlugin` returns success with
-                                // `state = DISABLED` when registration failed as binary-incompatible.
-                                if (info.state == PluginState.LOADED) reporter.report(info.manifest)
-                            }
-                        }
+                        activateUpdate(pluginId, path, manager)
                     },
                     onProgress = { DownloadCenter.progress(pluginId, it) },
                     onInstalling = {
@@ -181,19 +171,8 @@ actual object PluginUpdateBridge {
             }
         return if (result.isSuccess) {
             PluginUpdateRegistry.clear(pluginId)
-            // Skipped when deferred: the old jar is still open in the live classloader, and
-            // reconciling now would delete the file out from under it.
-            if (!deferHotReload) {
-                // Remove the previous version's JAR (and any other stale duplicates).
-                // Matching is by manifest pluginId, so it handles every filename
-                // convention; the just-installed JAR is the highest version and is kept.
-                runCatching {
-                    ai.rever.boss.plugin.PluginJarReconciler
-                        .reconcilePluginDir(pluginDir)
-                }.onFailure { e ->
-                    logger.warn(LogCategory.SYSTEM, "Post-update plugin dir reconcile failed: ${e.message}")
-                }
-            }
+            // Keep superseded artifacts until startup. A directory-wide reconcile here could
+            // delete a running browser JAR staged by an earlier update to a different plugin.
             Result.success(update.newVersion)
         } else {
             discardIfUnswapped(swapStarted, targetFile)
@@ -201,26 +180,39 @@ actual object PluginUpdateBridge {
         }
     }
 
+    private suspend fun activateUpdate(
+        pluginId: String,
+        path: String,
+        manager: DynamicPluginManager,
+    ): Result<Unit> =
+        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+            runCatching { stageForRestart(pluginId, path, manager) }
+                .onFailure { discardIfUnswapped(false, File(path)) }
+        } else {
+            manager.installPlugin(path).map { info ->
+                if (info.state == PluginState.LOADED) MissingDependencyReporter.forManager(manager).report(info.manifest)
+            }
+        }
+
     /**
      * Records [jarPath] as [pluginId]'s installed jar without touching the running instance, and
      * tells the user a restart is needed to actually pick it up (BossConsole#71).
      *
-     * Mirrors [ai.rever.boss.plugin.PluginLoaderDelegateImpl]'s own deferred-reload helper;
-     * `installedVersion = null` is deliberate there for the same reason here - [PluginPersistence]
-     * backfills it from the jar's own manifest on its next load.
+     * Validate the manifest and record its actual version because this bypasses installPlugin.
      */
     private fun stageForRestart(
         pluginId: String,
         jarPath: String,
         manager: DynamicPluginManager,
     ) {
+        val manifest = readDeferredPluginManifest(pluginId, jarPath)
         val existing = manager.getPluginInfo(pluginId)
         PluginPersistence.addInstalledPlugin(
             pluginId = pluginId,
             jarPath = jarPath,
             enabled = existing?.enabled ?: true,
             sourceUrl = PluginPersistence.getSourceUrl(pluginId),
-            installedVersion = null,
+            installedVersion = manifest.version,
         )
         logger.info(
             LogCategory.SYSTEM,

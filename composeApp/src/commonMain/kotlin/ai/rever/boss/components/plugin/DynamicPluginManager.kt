@@ -1892,7 +1892,9 @@ class DynamicPluginManager(
                 mapOf("pluginId" to pluginId),
             )
             return Result.failure(
-                IllegalStateException("${info.manifest.displayName} cannot be hot-reloaded - restart BOSS to reload it"),
+                IllegalStateException(
+                    "${info.manifest.displayName} cannot be hot-reloaded - restart BOSS to reload it",
+                ),
             )
         }
 

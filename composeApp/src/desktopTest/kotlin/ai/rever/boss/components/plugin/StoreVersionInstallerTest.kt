@@ -75,6 +75,7 @@ class StoreVersionInstallerTest {
     private fun installer(
         readManifestId: String? = PLUGIN,
         promoteThrows: Boolean = false,
+        runningVersion: String = VERSION,
     ) = StoreVersionInstaller(
         pluginDir = { dir },
         hooks =
@@ -84,7 +85,7 @@ class StoreVersionInstallerTest {
                         PluginManifest(
                             pluginId = id,
                             displayName = "Probe",
-                            version = VERSION,
+                            version = if (File(path).name == "running.jar") runningVersion else VERSION,
                             apiVersion = "1.0.0",
                             mainClass = "com.example.Main",
                         ).takeIf { File(path).exists() }
@@ -247,6 +248,21 @@ class StoreVersionInstallerTest {
                 persisted.toList(),
             )
             assertEquals(listOf("Probe"), deferredNotices)
+        }
+
+    @Test
+    fun `a deferred downgrade is refused because startup would select the newer live jar`() =
+        runTest {
+            val running = File(dir, "running.jar").apply { writeText("live bytes") }
+            val result = installer(readManifestId = notHotReloadablePlugin, runningVersion = "9.0.0")
+                .run(pluginId = notHotReloadablePlugin, runningJarPath = running.absolutePath)
+
+            assertTrue(result.isFailure)
+            assertTrue(running.exists())
+            assertTrue(unloaded.isEmpty())
+            assertTrue(loaded.isEmpty())
+            assertTrue(persisted.isEmpty())
+            assertTrue(deferredNotices.isEmpty())
         }
 
     @Test

@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.repository.PluginRepository
+import ai.rever.boss.utils.Version
 import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -160,6 +161,49 @@ internal class StoreVersionInstaller(
         return activate(request, target, unload, load)
     }
 
+    private fun stageForRestart(
+        request: StoreVersionRequest,
+        target: File,
+        declared: PluginManifest,
+    ): Result<String> {
+        val pluginId = request.pluginId
+        val version = request.version
+        // Startup reconciliation keeps the highest version. Do not report a downgrade as
+        // staged when retaining the newer live artifact means it will win again at restart.
+        if (hasNewerArtifact(declared)) {
+            hooks.discardFiles(target.absolutePath)
+            return failure("Cannot stage an older browser version while a newer version remains installed.")
+        }
+        val persisted =
+            runCatching { hooks.persist(pluginId, target.absolutePath, declared.version, request.sourceUrl) }
+        if (persisted.isFailure) {
+            hooks.discardFiles(target.absolutePath)
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Could not record a deferred plugin update",
+                mapOf("pluginId" to pluginId, "error" to (persisted.exceptionOrNull()?.message ?: "unknown")),
+            )
+            return failure("Downloaded v$version but could not record it for the next restart.")
+        }
+        logger.info(
+            LogCategory.SYSTEM,
+            "Deferred a store install to the next restart - this plugin owns a native surface",
+            mapOf("pluginId" to pluginId, "version" to version),
+        )
+        hooks.notifyDeferred(declared.displayName)
+        return Result.success(declared.version)
+    }
+
+    private fun hasNewerArtifact(declared: PluginManifest): Boolean {
+        val selected = Version.parse(declared.version) ?: Version(0, 0, 0)
+        return pluginDir().listFiles().orEmpty().any { file ->
+            if (!file.isFile || file.extension != "jar") return@any false
+            val candidate = hooks.readManifest(file.absolutePath)
+            candidate?.pluginId == declared.pluginId &&
+                (Version.parse(candidate.version) ?: Version(0, 0, 0)) > selected
+        }
+    }
+
     /**
      * Vet the downloaded jar, drop the running build and put the new one in its place.
      *
@@ -198,24 +242,7 @@ internal class StoreVersionInstaller(
         // left in place too (unlike the normal path below, which lets PluginJarReconciler clean
         // it up next launch): the still-running classloader still has it open.
         if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
-            val persisted =
-                runCatching { hooks.persist(pluginId, target.absolutePath, declared.version, request.sourceUrl) }
-            if (persisted.isFailure) {
-                hooks.discardFiles(target.absolutePath)
-                logger.warn(
-                    LogCategory.SYSTEM,
-                    "Could not record a deferred plugin update",
-                    mapOf("pluginId" to pluginId, "error" to (persisted.exceptionOrNull()?.message ?: "unknown")),
-                )
-                return failure("Downloaded v$version but could not record it for the next restart.")
-            }
-            logger.info(
-                LogCategory.SYSTEM,
-                "Deferred a store install to the next restart - this plugin owns a native surface",
-                mapOf("pluginId" to pluginId, "version" to version),
-            )
-            hooks.notifyDeferred(declared.displayName)
-            return Result.success(declared.version)
+            return stageForRestart(request, target, declared)
         }
 
         // Force, because this is a deliberate replacement: the point is to drop the local build.

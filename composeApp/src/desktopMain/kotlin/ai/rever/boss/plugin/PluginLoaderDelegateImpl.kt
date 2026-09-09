@@ -489,21 +489,20 @@ class PluginLoaderDelegateImpl(
      * Records [jarPath] as this plugin's installed jar without touching the running instance,
      * and tells the user a restart is needed to actually pick it up (BossConsole#71).
      *
-     * `installedVersion = null` is deliberate, not a gap: [PluginPersistence] backfills a null
-     * version from the jar's own manifest on its next load, so re-reading it here would just be a
-     * second copy of that logic.
+     * Read the manifest before recording it: this deferred path bypasses installPlugin.
      */
     private fun deferReloadToRestart(
         pluginId: String,
         jarPath: String,
     ) {
+        val manifest = readDeferredPluginManifest(pluginId, jarPath)
         val existing = PluginPersistence.getInstalledPlugin(pluginId)
         PluginPersistence.addInstalledPlugin(
             pluginId = pluginId,
             jarPath = jarPath,
             enabled = existing?.enabled ?: true,
             sourceUrl = existing?.sourceUrl,
-            installedVersion = null,
+            installedVersion = manifest.version,
         )
         logger.info(
             LogCategory.SYSTEM,
