@@ -5,6 +5,7 @@ import ai.rever.boss.ipc.services.EventBusServiceImpl
 import com.google.protobuf.ByteString
 import io.grpc.ManagedChannelBuilder
 import io.grpc.ServerBuilder
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -24,7 +25,6 @@ import kotlin.test.assertTrue
 class EventBusServiceTest {
     private companion object {
         const val POLL_MS = 25L
-        const val SETTLE_MS = 100L
         const val BATCH_SIZE = 3
     }
 
@@ -73,20 +73,6 @@ class EventBusServiceTest {
             publish()
             delay(POLL_MS)
         }
-    }
-
-    /**
-     * Wait until a subscription has been registered with the service.
-     *
-     * Weaker than [publishUntilDelivered] — the count increments when the RPC handler runs, which is still
-     * ahead of the flow being collected — but it is what a test asserting an exact event count can use,
-     * since republishing would change the count it asserts. Still strictly better than a fixed sleep.
-     */
-    private suspend fun awaitSubscriberRegistered() {
-        while (eventBusService.activeSubscribers < 1) {
-            delay(POLL_MS)
-        }
-        delay(SETTLE_MS)
     }
 
     @Test
@@ -185,22 +171,33 @@ class EventBusServiceTest {
                 val stub = EventBusServiceGrpcKt.EventBusServiceCoroutineStub(channel!!)
 
                 val received = mutableListOf<EventEnvelope>()
+                val ready = CompletableDeferred<Unit>()
                 val subscribeRequest =
                     SubscribeRequest
                         .newBuilder()
                         .setSubscriberId("batch-subscriber")
                         .addEventTypes("BatchEvent")
+                        .addEventTypes("ReadyProbe")
                         .build()
 
                 val subscriberJob =
                     launch {
                         stub.subscribe(subscribeRequest).collect { envelope ->
-                            received.add(envelope)
-                            if (received.size == BATCH_SIZE) return@collect
+                            if (envelope.eventType == "ReadyProbe") {
+                                ready.complete(Unit)
+                            } else {
+                                received.add(envelope)
+                            }
                         }
                     }
 
-                awaitSubscriberRegistered()
+                // Observing a probe proves this stream is collecting. Retry only probes, so delayed
+                // delivery cannot duplicate the batch or hide a batch with missing entries.
+                val probe = EventEnvelope.newBuilder().setEventType("ReadyProbe").build()
+                while (!ready.isCompleted) {
+                    stub.publish(probe)
+                    delay(POLL_MS)
+                }
 
                 val batchRequest =
                     PublishBatchRequest
@@ -216,19 +213,7 @@ class EventBusServiceTest {
                             },
                         ).build()
 
-                // awaitSubscriberRegistered() is the weaker guard the class doc warns about: the RPC
-                // handler having run is still ahead of the flow actually being collected, and this
-                // batch - unlike the single-event tests - cannot use publishUntilDelivered's
-                // republish-until-the-subscriber-reacts pattern verbatim, since republishing an
-                // already-arriving batch would inflate the count this test asserts exactly. Republish
-                // the whole batch only while NOTHING has arrived yet: a truly-missed publish (the
-                // MutableSharedFlow has no replay) means all three were lost together, so resending
-                // then cannot double a partial delivery - which is what actually reproduced this
-                // flake on the Windows CI runner (the slowest leg, same as the class doc's history).
-                while (received.isEmpty() && subscriberJob.isActive) {
-                    stub.publishBatch(batchRequest)
-                    delay(POLL_MS)
-                }
+                assertTrue(stub.publishBatch(batchRequest).success)
 
                 // Wait for the three, rather than sleeping long enough that they have probably arrived. The
                 // enclosing withTimeout is the bound if they never do, so a real failure reports as a
@@ -238,7 +223,11 @@ class EventBusServiceTest {
                 }
                 subscriberJob.cancel()
 
-                assertEquals(BATCH_SIZE, received.size, "Should receive all 3 batch events")
+                assertEquals(
+                    (1..BATCH_SIZE).map { "event-$it" },
+                    received.map { it.payload.toStringUtf8() },
+                    "Should receive each batch event once, in order",
+                )
             }
         }
 
