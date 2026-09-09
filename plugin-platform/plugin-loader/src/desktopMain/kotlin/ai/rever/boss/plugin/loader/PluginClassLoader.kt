@@ -97,7 +97,9 @@ class PluginClassLoader(
 
         /**
          * Whether any known plugin classloader still has [path] open - state `ACTIVE` or
-         * `UNLOAD_IN_PROGRESS`, i.e. [close] has not run yet (BossConsole#72).
+         * `UNLOAD_IN_PROGRESS`, i.e. [close] has not finished releasing resources (BossConsole#72).
+         * The registry is weak: collectible loaders are not retained by this guard. Canonical-path
+         * failures also return false; this is a best-effort check, not a filesystem lock.
          *
          * `PluginJarReconciler` uses this before deleting a superseded jar: a live classloader
          * merely existing is not sufficient, because not everything reads a plugin through the
@@ -519,7 +521,7 @@ class PluginClassLoader(
      * Close this classloader and release resources.
      */
     override fun close() {
-        markUnloaded()
+        markUnloading()
         logger.info(
             LogCategory.SYSTEM,
             "Closing plugin classloader",
@@ -527,7 +529,11 @@ class PluginClassLoader(
                 "pluginId" to pluginId,
             ),
         )
-        super.close()
+        try {
+            super.close()
+        } finally {
+            markUnloaded()
+        }
     }
 
     override fun toString(): String = "PluginClassLoader(pluginId=$pluginId, state=$state, urls=${getURLs().size})"

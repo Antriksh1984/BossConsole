@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin
 
 import ai.rever.boss.plugin.loader.PluginClassLoader
+import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import java.io.File
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
@@ -64,11 +65,11 @@ class PluginJarReconcilerLiveLoaderTest {
         return jar
     }
 
-    private fun openLoaderOver(jar: File): PluginClassLoader {
+    private fun openLoaderOver(vararg jars: File): PluginClassLoader {
         val loader =
             PluginClassLoader(
                 pluginId = "loader-under-test",
-                urls = arrayOf(jar.toURI().toURL()),
+                urls = jars.map { it.toURI().toURL() }.toTypedArray(),
                 parent = PluginJarReconcilerLiveLoaderTest::class.java.classLoader,
             )
         openLoaders.add(loader)
@@ -119,7 +120,7 @@ class PluginJarReconcilerLiveLoaderTest {
         val id = "ai.rever.boss.plugin.test.reconcile.multiple"
         val older = manifestJar(dir, "multiple-1.0.0.jar", id, "1.0.0")
         manifestJar(dir, "multiple-2.0.0.jar", id, "2.0.0")
-        val signature = File(older.absolutePath + ".sig").apply { writeText("test-sidecar") }
+        val signature = File(PluginSignatureSidecar.pathFor(older.absolutePath)).apply { writeText("test-sidecar") }
         val first = openLoaderOver(older)
         val second = openLoaderOver(older)
         first.close()
@@ -131,7 +132,24 @@ class PluginJarReconcilerLiveLoaderTest {
         second.close()
         val removed = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(id))
         assertTrue(older.name in removed.deleted)
+        assertFalse(older.exists())
         assertFalse(signature.exists())
+    }
+
+    @Test
+    fun `a superseded dependency URL is retained even when it is not the entry jar`() {
+        val dir = tempPluginDir()
+        val entry = manifestJar(dir, "entry.jar", "com.example.entry", "1.0.0")
+        val older = manifestJar(dir, "dependency-1.jar", "com.example.dependency", "1.0.0")
+        manifestJar(dir, "dependency-2.jar", "com.example.dependency", "2.0.0")
+        val loader = openLoaderOver(entry, older)
+        val retained = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf("com.example.dependency"))
+        assertTrue(older.name in retained.deferred)
+        assertTrue(older.exists())
+        loader.close()
+        val removed = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf("com.example.dependency"))
+        assertTrue(older.name in removed.deleted)
+        assertFalse(older.exists())
     }
 
     @Test
