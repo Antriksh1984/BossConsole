@@ -1698,10 +1698,9 @@ object PluginStoreSetup {
                     val existingJar = File(existingPlugin.jarPath)
                     if (existingJar.exists()) {
                         val existingManifest = readPluginManifest(existingJar)
-                        val bundledIsNotNewer =
-                            existingManifest != null &&
-                                !PluginVersionComparator.isNewerVersion(bundledVersion, existingManifest.version)
-                        if (existingManifest != null && bundledIsNotNewer) {
+                        if (existingManifest != null &&
+                            !PluginVersionComparator.isNewerVersion(bundledVersion, existingManifest.version)
+                        ) {
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Bundled plugin already installed with same/newer version - skipping",
