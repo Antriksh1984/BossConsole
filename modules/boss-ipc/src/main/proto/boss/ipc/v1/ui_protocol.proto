@@ -75,6 +75,17 @@ message UIRegistration {
   WidgetTree initial_tree = 6;
   // For panels: default slot position
   string default_slot = 7;     // e.g., "left.top.top", "right.top.bottom"
+
+  // Whether this surface may receive KeyEvent (unclaimed keys - see KeyEvent's own doc for what
+  // "unclaimed" means). False (the default, and every existing plugin's unset value) means the
+  // surface never becomes a focus target of its own and never receives one, matching the behavior
+  // every remote surface had before this field existed - additive, not a behavior change for a
+  // plugin built against an older host. A plugin whose widget tree has no interactive content and
+  // no reason to see raw key presses should leave this false even if it could set it: fewer
+  // capabilities declared is less for a reviewer, and a future host security prompt, to reason
+  // about. See KeyEvent and the host's Modifier.forwardUnclaimedKeys for the full policy this
+  // gates.
+  bool wants_keys = 8;
 }
 
 message UIRegistrationResponse {

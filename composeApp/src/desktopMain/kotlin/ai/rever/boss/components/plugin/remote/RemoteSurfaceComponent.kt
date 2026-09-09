@@ -25,6 +25,20 @@ internal class RemoteSurfaceComponent(
     private val _connected = mutableStateOf(false)
 
     /**
+     * Whether the plugin behind this surface declared [RemoteUiSurfaceDescriptor.wantsKeys].
+     * Read opportunistically off the registry rather than carried through a new
+     * [RemoteUiSurfaceHost] callback: the descriptor is immutable for a surface's whole lifetime, so
+     * there is nothing to keep in sync once read, and by the time either existing callback fires at
+     * least once the registration [registry].[RemoteUiSurfaceRegistry.surfaceOf] would read is
+     * already there - [RemoteUiSurfaceRegistry.attach]'s replay always calls
+     * [RemoteUiSurfaceHost.onConnectionChanged] (even with `false`) once the surface is registered,
+     * and [RemoteUiSurfaceHost.onTreeUpdated] never fires before it either. Stays at its safe
+     * `false` default for the entire window before either callback, matching every other "nothing
+     * has told us yet" state this component starts in.
+     */
+    private val _wantsKeys = mutableStateOf(false)
+
+    /**
      * The transport's view of this panel.
      *
      * Kept private rather than implemented by the class: these are calls the registry makes *into* the
@@ -33,13 +47,20 @@ internal class RemoteSurfaceComponent(
     private val surfaceHost =
         object : RemoteUiSurfaceHost {
             override fun onTreeUpdated(tree: WidgetTree) {
+                refreshWantsKeys()
                 updateTree(tree)
             }
 
             override fun onConnectionChanged(connected: Boolean) {
+                refreshWantsKeys()
                 _connected.value = connected
             }
         }
+
+    /** Re-read [RemoteUiSurfaceDescriptor.wantsKeys] off the registry; a no-op before registration. */
+    private fun refreshWantsKeys() {
+        _wantsKeys.value = registry.surfaceOf(surfaceId)?.descriptor?.wantsKeys == true
+    }
 
     /** Whether a plugin process is currently streaming this panel's surface. */
     val connected: State<Boolean> get() = _connected
@@ -53,6 +74,7 @@ internal class RemoteSurfaceComponent(
         RemoteSurfaceContent(
             tree = tree,
             connected = _connected.value,
+            wantsKeys = _wantsKeys.value,
             onEvent = { nodeId, event -> sendUIEvent(nodeId, event) },
         )
     }

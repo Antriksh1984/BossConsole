@@ -38,6 +38,13 @@ data class RemoteUiSurfaceDescriptor(
     val displayName: String = "",
     val iconName: String = "",
     val defaultSlot: String = "",
+    /**
+     * Whether the plugin declared it wants unclaimed [ai.rever.boss.ipc.proto.KeyEvent]s
+     * (the security note in docs/KEYBOARD_SHORTCUTS.md). False by default and for
+     * every plugin built against a proto before this field existed - the renderer that reads it
+     * must fail closed on a plugin that never sends it.
+     */
+    val wantsKeys: Boolean = false,
 )
 
 /** Outcome of a plugin's `RegisterUI`. */

@@ -242,6 +242,7 @@ class RemoteUiSurfaceRegistryTest {
                 displayName = "Inbox",
                 iconName = "mail",
                 defaultSlot = "left.top.top",
+                wantsKeys = true,
             )
 
         val surface = registry.register(SURFACE, PROCESS, descriptor).accepted()

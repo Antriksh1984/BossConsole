@@ -2,6 +2,7 @@ package ai.rever.boss.components.plugin.remote
 
 import ai.rever.boss.components.overlays.ContextMenu
 import ai.rever.boss.components.overlays.ContextMenuItem
+import ai.rever.boss.kernel.ui.RemoteUiSurfaceDescriptor
 import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.ui.sdk.*
@@ -34,19 +35,29 @@ import androidx.compose.ui.unit.sp
  *
  * @param tree      The widget tree to render
  * @param onEvent   Callback for UI events, forwarded to the owning plugin as proto `UIEvent`s
+ * @param wantsKeys Whether the plugin declared [RemoteUiSurfaceDescriptor.wantsKeys] at
+ *   registration. False (the default) omits the key tap entirely, so unclaimed
+ *   [ai.rever.boss.ipc.proto.KeyEvent]s never reach a plugin that never asked to see them — not
+ *   even the ones a focused interactive child (a text field's own unhandled keys, a button)
+ *   would otherwise let bubble this far. See [forwardUnclaimedKeys] for the full policy this
+ *   gates, and why the gate belongs here rather than on the plugin's own widget tree.
  */
 @Composable
 fun RemoteWidgetRenderer(
     tree: WidgetTree,
     onEvent: (nodeId: String, event: WidgetEvent) -> Unit = { _, _ -> },
+    wantsKeys: Boolean = false,
 ) {
     val root = tree.nodes[tree.rootId] ?: return
     // A wrapper only so the surface has one node above the whole tree to tap keys at — see
     // Modifier.forwardUnclaimedKeys for why that node is the right place and why it never consumes.
     // propagateMinConstraints so a root that fills its parent still does; the Box is otherwise
-    // transparent to layout.
+    // transparent to layout. The tap itself is added only for a surface that declared wantsKeys —
+    // omitting it, rather than adding it and having it decline everything, means a plugin that
+    // never asked for keys has no code path here that ever sees one, regardless of what inside
+    // its own tree happens to hold focus.
     Box(
-        modifier = Modifier.forwardUnclaimedKeys(onEvent),
+        modifier = if (wantsKeys) Modifier.forwardUnclaimedKeys(onEvent) else Modifier,
         propagateMinConstraints = true,
     ) {
         RenderNode(node = root, tree = tree, onEvent = onEvent)

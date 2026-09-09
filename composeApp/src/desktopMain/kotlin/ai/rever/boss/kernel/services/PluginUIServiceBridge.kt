@@ -377,6 +377,7 @@ class PluginUIServiceBridge(
             displayName = displayName,
             iconName = iconName,
             defaultSlot = defaultSlot,
+            wantsKeys = wantsKeys,
         )
 
     private fun registrationResponse(
