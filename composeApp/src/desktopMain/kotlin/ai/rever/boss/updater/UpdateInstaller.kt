@@ -138,6 +138,20 @@ private fun isWindowsInstallDir(
 ): Boolean = WINDOWS_INSTALL_MARKER_DIRS.any { exists(File(directory, it).path) }
 
 /**
+ * Delete the refused artifact, and ONLY it - never a different file (BossConsole#119).
+ *
+ * A standalone, pure-filesystem operation so "cannot delete a newer staged download or an
+ * unrelated file" (the issue's review, point 2) is provable directly: it never looks anywhere
+ * but at the exact [downloadFile] passed to it, so a sibling in the same staging directory - a
+ * newer version already staged, or an unrelated file - is structurally unreachable rather than
+ * merely untested. Best-effort: a failed delete leaves the file for the next reconcile rather
+ * than blocking the refusal from being reported.
+ */
+internal fun deleteRefusedArtifact(downloadFile: File): Boolean =
+    runCatching { downloadFile.delete() }
+        .getOrDefault(false)
+
+/**
  * Platform-specific update installation logic
  *
  * This class handles the actual installation of updates for different platforms.
@@ -155,8 +169,21 @@ sealed class InstallResult {
     data class Error(
         val message: String,
     ) : InstallResult()
+
+    /**
+     * Refused because this Mac's OS is below the release's `LSMinimumSystemVersion`
+     * (BossConsole#119) - a typed subtype of [Error] rather than a flag on it, so a
+     * `when` that already exhausts [InstallResult] must decide what this means rather
+     * than silently falling into the generic branch.
+     */
+    data class UnsupportedOs(
+        val message: String,
+    ) : InstallResult()
 }
 
+// One cohesive dispatcher over every platform's install mechanics (macOS/Windows/Linux deb/rpm/jar);
+// splitting it does not reduce complexity, only adds indirection between callers who need it as a unit.
+@Suppress("LargeClass")
 object UpdateInstaller {
     private val logger = BossLogger.forComponent("UpdateInstaller")
 
@@ -547,7 +574,20 @@ object UpdateInstaller {
                     // (JxBrowser 9.4.0 took it 12.0 -> 13.0) and the release
                     // manifest carries no minimum-OS field, so nothing upstream
                     // stops the update being offered.
-                    unsupportedOsError(appBundle)?.let { return@withContext InstallResult.Error(it) }
+                    unsupportedOsError(appBundle)?.let { message ->
+                        // The refused artifact must not linger: it is the whole app,
+                        // sitting in a restricted staging directory, and every later
+                        // automatic check would otherwise re-download the same
+                        // unusable DMG (BossConsole#119). The message is captured
+                        // before the delete attempt, so a delete failure never loses it.
+                        logger.warn(
+                            LogCategory.SYSTEM,
+                            "Refusing an unsupported-OS update - removing the refused artifact",
+                            mapOf("reason" to message, "path" to downloadFile.name),
+                        )
+                        deleteRefusedArtifact(downloadFile)
+                        return@withContext InstallResult.UnsupportedOs(message)
+                    }
 
                     logger.info(LogCategory.SYSTEM, "DMG verified successfully", mapOf("appBundle" to appBundle.name))
 

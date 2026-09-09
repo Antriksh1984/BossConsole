@@ -71,10 +71,17 @@ data class VersionInfo(
  * `LSMinimumSystemVersion` this Mac does not meet. Flattening that to `false`
  * surfaced a red "Installation failed" with the real explanation only in a log
  * file, which is indistinguishable from a crash to the person looking at it.
+ *
+ * [isUnsupportedOs] (BossConsole#119) distinguishes that one refusal reason
+ * from every other install failure: [UpdateManager] uses it to remember this
+ * exact version so automatic checks stop re-offering (and re-downloading) a
+ * release this machine cannot run, without treating an ordinary failure the
+ * same way.
  */
 data class InstallOutcome(
     val succeeded: Boolean,
     val errorMessage: String? = null,
+    val isUnsupportedOs: Boolean = false,
 )
 
 /**

@@ -483,6 +483,11 @@ actual class UpdateService {
                 logger.error(LogCategory.SYSTEM, "Update installation failed", mapOf("error" to result.message))
                 InstallOutcome(succeeded = false, errorMessage = result.message)
             }
+
+            is InstallResult.UnsupportedOs -> {
+                logger.warn(LogCategory.SYSTEM, "Update refused - unsupported OS", mapOf("error" to result.message))
+                InstallOutcome(succeeded = false, errorMessage = result.message, isUnsupportedOs = true)
+            }
         }
     }
 

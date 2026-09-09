@@ -21,7 +21,17 @@ import kotlin.time.Duration
  * coordinator is the single owner that can [shutdown], windows hold handles that
  * cannot.
  */
-class UpdateManager {
+class UpdateManager internal constructor(
+    /**
+     * Test-only seam for the "real manager check/install path" (BossConsole#119's
+     * review asked for exactly this, not a test against [claimStagedUpdate] in
+     * isolation): [UpdateService] is a fixed no-arg `expect`/`actual` type with no
+     * injectable release source reachable from here, so this substitutes at the one
+     * layer up instead. All-null by default, which is production behavior
+     * unchanged - [updateService] is still the sole real caller.
+     */
+    private val testHooks: UpdateManagerTestHooks = UpdateManagerTestHooks(),
+) {
     private val logger = BossLogger.forComponent("UpdateManager")
 
     // Internal for access by VersionListManager
@@ -167,7 +177,7 @@ class UpdateManager {
             _updateState.value = UpdateState.CheckingForUpdates
             _lastCheckTime.value = Clock.System.now()
 
-            val updateInfo = updateService.checkForUpdates()
+            val updateInfo = testHooks.checkForUpdates?.invoke() ?: updateService.checkForUpdates()
             _updateInfo.value = updateInfo
 
             when {
@@ -306,10 +316,10 @@ class UpdateManager {
         try {
             _updateState.value = UpdateState.Downloading(0f)
 
+            val onProgress: (Float) -> Unit = { progress -> _updateState.value = UpdateState.Downloading(progress) }
             val downloadPath =
-                updateService.downloadUpdate(updateInfo) { progress ->
-                    _updateState.value = UpdateState.Downloading(progress)
-                }
+                testHooks.downloadUpdate?.invoke(updateInfo, onProgress)
+                    ?: updateService.downloadUpdate(updateInfo, onProgress)
 
             if (downloadPath != null) {
                 _updateState.value = UpdateState.ReadyToInstall(downloadPath)
@@ -412,21 +422,45 @@ class UpdateManager {
             return false
         }
         return try {
-            val outcome = updateService.installUpdate(downloadPath)
+            val outcome = testHooks.installUpdate?.invoke(downloadPath) ?: updateService.installUpdate(downloadPath)
             if (outcome.succeeded) {
                 _updateState.value = UpdateState.RestartRequired
             } else {
                 // Prefer the installer's own explanation. It is the only place that
                 // knows *why* — e.g. a release requiring a newer macOS than this
                 // Mac runs — and a generic string there is indistinguishable from
-                // a crash to the user.
-                _updateState.value = UpdateState.Error(outcome.errorMessage ?: "Installation failed")
+                // a crash to the user. The error is shown FIRST, unconditionally -
+                // persistence below must never be what decides whether the user
+                // sees why their install just failed.
+                _updateState.value =
+                    UpdateState.Error(
+                        outcome.errorMessage ?: "Installation failed",
+                        isUnsupportedOs = outcome.isUnsupportedOs,
+                    )
+                if (outcome.isUnsupportedOs) persistUnsupportedOsDismissal()
             }
             outcome.succeeded
         } catch (e: Exception) {
             _updateState.value = UpdateState.Error("Installation failed: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Remember the currently-offered version as dismissed (BossConsole#119), so a later
+     * automatic check does not re-offer - and re-download - a release this machine cannot run.
+     *
+     * Reuses [UpdateSettings.lastDismissedVersion], the same storage [dismissVersion] writes,
+     * but deliberately does not call [dismissVersion] itself: that hides the dialog and resets
+     * the state to [UpdateState.Idle], which here would erase the refusal message
+     * [installUpdate] just set instead of explaining it. A forced/manual check still bypasses
+     * this the same way it bypasses a user dismissal; a different, newer version is unaffected,
+     * since only the version [_updateInfo] currently names is recorded.
+     */
+    private suspend fun persistUnsupportedOsDismissal() {
+        val unsupportedVersion = _updateInfo.value?.latestVersion ?: return
+        UpdateSettings.lastDismissedVersion = unsupportedVersion.toString()
+        UpdateSettingsManager.saveSettings()
     }
 
     /**
@@ -471,6 +505,24 @@ class UpdateManager {
 }
 
 /**
+ * Test-only substitutes for [UpdateManager]'s three [UpdateService] calls (BossConsole#119).
+ *
+ * All default to null, so a `UpdateManager()` production instance behaves exactly as if this
+ * type did not exist. Bundled into one object, matching this codebase's own `Hooks` convention
+ * (e.g. `PluginArtifactCleanup.Hooks`), rather than three separate constructor parameters.
+ *
+ * Grouped as three because a check-refuse-recheck cycle test needs a controlled release
+ * (`checkForUpdates`), a way to get from `UpdateAvailable` to the `ReadyToInstall` state
+ * `installUpdate` requires without touching a real filesystem (`downloadUpdate`), and a
+ * controlled refusal (`installUpdate`) - not because each is independently useful alone.
+ */
+internal class UpdateManagerTestHooks(
+    val checkForUpdates: (suspend () -> UpdateInfo)? = null,
+    val downloadUpdate: (suspend (UpdateInfo, (Float) -> Unit) -> String?)? = null,
+    val installUpdate: (suspend (String) -> InstallOutcome)? = null,
+)
+
+/**
  * Update state sealed class
  */
 sealed class UpdateState {
@@ -498,6 +550,15 @@ sealed class UpdateState {
 
     data class Error(
         val message: String,
+        /**
+         * True when this failure is [InstallOutcome.isUnsupportedOs] (BossConsole#119):
+         * the release this Mac cannot run, rather than an ordinary install failure.
+         * [UpdateManager.installUpdate] also persists a dismissal for this case, so a
+         * later automatic check does not re-offer (and re-download) the same version -
+         * but the error itself stays visible here rather than resetting to [Idle], since
+         * unlike [UpdateManager.dismissVersion] the user did not ask to dismiss anything.
+         */
+        val isUnsupportedOs: Boolean = false,
     ) : UpdateState()
 }
 
