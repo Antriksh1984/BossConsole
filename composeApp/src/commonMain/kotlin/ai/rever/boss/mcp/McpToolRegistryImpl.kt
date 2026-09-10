@@ -829,17 +829,35 @@ internal class McpToolRegistryCore(
                 ) {
                     is McpApprovalDecision.Approved -> {
                         val disposition =
-                            if (decision.trustForSession) {
-                                McpApprovalDisposition.SESSION_TRUSTED
-                            } else {
-                                McpApprovalDisposition.APPROVED_ONCE
+                            when {
+                                // Persisted takes precedence over session trust when both are
+                                // somehow set: a rule on disk survives restarts, session trust
+                                // does not, and there's nothing left for the weaker scope to add.
+                                decision.persistPolicy -> {
+                                    policyEngine.setToolPolicy(tool.definition.name, McpPolicyAction.ALLOW)
+                                    McpApprovalDisposition.PERSISTENTLY_ALLOWED
+                                }
+
+                                decision.trustForSession -> {
+                                    McpApprovalDisposition.SESSION_TRUSTED
+                                }
+
+                                else -> {
+                                    McpApprovalDisposition.APPROVED_ONCE
+                                }
                             }
                         disposition to null
                     }
 
                     is McpApprovalDecision.Denied -> {
-                        McpApprovalDisposition.DENIED_BY_OPERATOR to
-                            "MCP tool rejected by operator: ${decision.reason}"
+                        val disposition =
+                            if (decision.persistPolicy) {
+                                policyEngine.setToolPolicy(tool.definition.name, McpPolicyAction.DENY)
+                                McpApprovalDisposition.PERSISTENTLY_DENIED
+                            } else {
+                                McpApprovalDisposition.DENIED_BY_OPERATOR
+                            }
+                        disposition to "MCP tool rejected by operator: ${decision.reason}"
                     }
 
                     McpApprovalDecision.QueueFull -> {
