@@ -27,7 +27,8 @@ class DeepLinkForwardingTest {
 
     @Test
     fun `an unsuccessful action is submitted only once even if a retry would succeed`() {
-        for (link in listOf("boss://plugin?id=x&action=run", "BOSS://PLUGIN?action=run", "boss://plugin?id=x&action=")) {
+        val links = listOf("boss://plugin?id=x&action=run", "BOSS://PLUGIN?action=run", "boss://plugin?id=x&action=")
+        for (link in links) {
             var sends = 0
             var pauses = 0
             val accepted = forwardDeepLinkWithRetry(link, { ++sends > 1 }, { pauses++ })

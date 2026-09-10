@@ -881,6 +881,20 @@ private fun acceptNextClient(
         null
     }
 
+private fun pluginActionResponse(verdict: kotlinx.coroutines.Deferred<Boolean>?): String {
+    if (verdict == null) return RESPONSE_OK
+    val handled = kotlinx.coroutines.runBlocking { awaitPluginAction(verdict, OPEN_ACTION_TIMEOUT_MS) }
+    return when (handled) {
+        true -> RESPONSE_OK
+
+        false -> RESPONSE_ERROR_PREFIX + "Plugin action was not handled"
+
+        // The deadline cancels queued dispatch; an already-running synchronous
+        // handler cannot be interrupted, so its outcome remains unknown.
+        null -> RESPONSE_ERROR_PREFIX + "Plugin action outcome unknown (timed out); do not retry automatically"
+    }
+}
+
 /**
  * Manages single-instance application behavior.
  *
@@ -1123,29 +1137,7 @@ object SingleInstanceManager {
                 // answer to await, so its OK/ERROR reflects whether the
                 // registered handler reported the action handled, not just that a
                 // coroutine was launched for it.
-                if (verdict == null) {
-                    RESPONSE_OK
-                } else {
-                    val handled =
-                        kotlinx.coroutines.runBlocking {
-                            awaitPluginAction(verdict, OPEN_ACTION_TIMEOUT_MS)
-                        }
-                    when (handled) {
-                        true -> {
-                            RESPONSE_OK
-                        }
-
-                        false -> {
-                            RESPONSE_ERROR_PREFIX + "Plugin action was not handled"
-                        }
-
-                        null -> {
-                            // Cancels an action still queued on Main. A synchronous handler
-                            // already running cannot be interrupted, so its outcome is unknown.
-                            RESPONSE_ERROR_PREFIX + "Plugin action outcome unknown (timed out); do not retry automatically"
-                        }
-                    }
-                }
+                pluginActionResponse(verdict)
             }
 
             request.verb == VERB_LLM_TOKEN -> {
