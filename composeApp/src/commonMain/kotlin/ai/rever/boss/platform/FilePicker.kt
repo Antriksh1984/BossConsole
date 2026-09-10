@@ -46,8 +46,8 @@ expect fun pickSaveFile(
 /**
  * Synchronously asks the user to confirm downloading a file recognized as executable
  * (see [ai.rever.boss.platform.FileNameSanitizer.isExecutableFile]). Used for the
- * download-start callback (must block until user responds), the same way [pickSaveFile]
- * blocks that callback for a save location.
+ * download-start handler, which currently waits for consent before answering the
+ * asynchronous JxBrowser callback, just as [pickSaveFile] waits for a save location.
  *
  * @param fileName The name of the file being downloaded, shown in the prompt
  * @return true if the user chose to proceed, false to cancel the download (including
