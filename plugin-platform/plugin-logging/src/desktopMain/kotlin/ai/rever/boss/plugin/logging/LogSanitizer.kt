@@ -468,7 +468,8 @@ object LogSanitizer {
         val withMaskedQueryParams =
             sensitiveQueryParamPattern.replace(text) { match ->
                 val (prefix, name, value) = match.destructured
-                val sensitive = nameMarksSecret(name) || sensitiveUriParamNames.any { name.equals(it, ignoreCase = true) }
+                val sensitive =
+                    nameMarksSecret(name) || sensitiveUriParamNames.any { name.equals(it, ignoreCase = true) }
                 if (sensitive && value.lowercase() !in nonSecretValues) {
                     "$prefix$name=[REDACTED]"
                 } else {
