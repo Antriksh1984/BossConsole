@@ -47,7 +47,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arkivanov.decompose.extensions.compose.subscribeAsState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun BossBottomBar(tabsComponent: BossTabsComponent? = null) {
@@ -249,7 +251,16 @@ fun BossRightBottomBar() {
     if (showPolicyManager) {
         McpPolicyManagerDialog(
             rules = persistedPolicyConfig.rules,
-            onRevoke = { toolName -> McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName) },
+            // Dispatchers.IO: revokePersistedPolicy does a synchronized atomicWriteText disk
+            // write, and setToolPolicy already made the equivalent invocation-path write take
+            // this same dispatcher (McpToolRegistryImpl) - this call site was the one still
+            // running it on the UI thread, where a click could block behind another write
+            // holding the same lock from a slow, networked or AV-scanned home directory.
+            onRevoke = { toolName ->
+                withContext(Dispatchers.IO) {
+                    McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName)
+                }
+            },
             onDismiss = { showPolicyManager = false },
         )
     }

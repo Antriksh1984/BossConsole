@@ -234,7 +234,7 @@ fun McpApprovalDialog(
                 Text(
                     "Always choices apply to this tool name for all agents and arguments, across restarts " +
                         "and replacement plugins. " +
-                        "To change a saved rule, edit ~/.boss/mcp-tool-policy.json and restart BOSS.",
+                        "Saved rules can be reviewed and reset from \"Persisted MCP policies\" in the bottom bar.",
                     color = colors.textSecondary,
                     fontSize = 11.sp,
                 )

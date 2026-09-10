@@ -803,7 +803,19 @@ internal class McpToolRegistryCore(
         }
     }
 
-    /** Recheck access before saving a queued ALLOW; a failed write never authorizes execution. */
+    /**
+     * Recheck access before saving a queued ALLOW; a failed write never authorizes execution.
+     *
+     * **Known limitation, not fixed here**: `preserveDeny = true` guards only against a newer
+     * *DENY* written while this approval sat queued - it does not know about a newer *revocation*
+     * ([ai.rever.boss.mcp.McpPolicyEngine.revokePersistedPolicy]), which also lands after this
+     * approval was queued but is not itself a DENY. An operator who revokes a persisted ALLOW
+     * while an older "Always Allow" is still waiting to be answered can have that older answer
+     * re-persist the very rule they just removed. Closing it needs a revocation generation/
+     * timestamp compared inside [McpPolicyEngine]'s lock, which is a larger change than this
+     * recheck; see AGENTS.md's "Governed MCP invocation" section, which documents the same gap
+     * for an operator debugging "I revoked it and it came back".
+     */
     @Suppress("ReturnCount") // Ordered denial, access revocation, persistence and write-failure outcomes.
     private suspend fun validateApproval(
         tool: RegisteredMcpTool,

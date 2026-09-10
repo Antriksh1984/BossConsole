@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.launch
 
 /**
  * Lets an operator see and undo every persistent MCP tool policy rule saved from the approval
@@ -49,14 +51,22 @@ import androidx.compose.ui.window.DialogProperties
 @Suppress("LongMethod") // Declarative Compose layout.
 fun McpPolicyManagerDialog(
     rules: Map<String, McpPolicyAction>,
-    onRevoke: (toolName: String) -> Boolean,
+    onRevoke: suspend (toolName: String) -> Boolean,
     onDismiss: () -> Unit,
 ) {
     val colors = BossTheme.colors
     val radii = BossTheme.radius
-    // Which tool's revoke most recently failed to persist - cleared on the next attempt for that
-    // tool, so a stale error does not linger once retried.
+    val scope = rememberCoroutineScope()
+    // Which tool's revoke most recently failed to persist. A single slot, not a set: a
+    // SUCCESSFUL revoke of any tool clears it, not only a retry of the same one, so two failures
+    // in quick succession show only the most recent - accepted, since this is diagnostic rather
+    // than an audit trail (the host log has that).
     var failedRevoke by remember { mutableStateOf<String?>(null) }
+    // A DENY row asked to confirm once before it resets: resetting an ALLOW reduces standing
+    // privilege, but resetting a DENY raises it, removing the one rule that beats session trust
+    // (McpPolicyEngine.policyFor). Tracks at most one row at a time - switching to a different
+    // row's button, or dismissing, drops any pending confirmation rather than carrying it silently.
+    var confirmingDeny by remember { mutableStateOf<String?>(null) }
 
     BossDialog(
         onDismissRequest = onDismiss,
@@ -78,7 +88,9 @@ fun McpPolicyManagerDialog(
                 Text(
                     text =
                         "Saved from \"Always Allow\" / \"Always Deny\" in the tool approval dialog. " +
-                            "Resetting a tool returns it to Ask - the next mutating call prompts again.",
+                            "Resetting a tool removes its saved rule - the next mutating call is " +
+                            "governed by the default policy again, asking unless that default is " +
+                            "itself Allow or Deny.",
                     fontSize = 12.sp,
                     color = colors.textSecondary,
                 )
@@ -118,19 +130,42 @@ fun McpPolicyManagerDialog(
                                     )
                                     if (failedRevoke == toolName) {
                                         Text(
-                                            text = "Could not save - see the host log for the reason.",
+                                            // The write failing is not "nothing happened": revokeSessionTrust
+                                            // already ran (McpPolicyEngine.revokePersistedPolicy), so the tool
+                                            // genuinely asks again for the rest of this session even though the
+                                            // saved rule itself could not be cleared.
+                                            text =
+                                                "Saved rule unchanged; session trust cleared until restart. " +
+                                                    "See the host log.",
                                             fontSize = 11.sp,
                                             color = colors.alert,
                                         )
                                     }
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
-                                TextButton(
-                                    onClick = {
+
+                                fun revoke() {
+                                    confirmingDeny = null
+                                    scope.launch {
                                         failedRevoke = if (onRevoke(toolName)) null else toolName
-                                    },
-                                ) {
-                                    Text("Reset to Ask", fontSize = 12.sp)
+                                    }
+                                }
+                                // Removing an ALLOW is a de-escalation and needs no confirmation.
+                                // Removing a DENY is the one control in this dialog that INCREASES
+                                // what the tool is allowed to do, so it gets a second tap instead of
+                                // firing on the first click like every other row's button does.
+                                if (action == McpPolicyAction.DENY && confirmingDeny != toolName) {
+                                    TextButton(onClick = { confirmingDeny = toolName }) {
+                                        Text("Remove denial", fontSize = 12.sp, color = colors.alert)
+                                    }
+                                } else if (action == McpPolicyAction.DENY) {
+                                    TextButton(onClick = { revoke() }) {
+                                        Text("Confirm remove?", fontSize = 12.sp, color = colors.alert)
+                                    }
+                                } else {
+                                    TextButton(onClick = { revoke() }) {
+                                        Text("Reset", fontSize = 12.sp)
+                                    }
                                 }
                             }
                         }
