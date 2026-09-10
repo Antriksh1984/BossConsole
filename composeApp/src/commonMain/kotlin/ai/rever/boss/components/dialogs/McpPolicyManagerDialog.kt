@@ -98,7 +98,7 @@ fun McpPolicyManagerDialog(
 
                 if (rules.isEmpty()) {
                     Text(
-                        text = "No persistent rules saved. Every tool still asks on each mutating call.",
+                        text = "No saved rules. Default policies and session trust still apply.",
                         fontSize = 13.sp,
                         color = colors.textSecondary,
                     )
@@ -130,12 +130,10 @@ fun McpPolicyManagerDialog(
                                     )
                                     if (failedRevoke == toolName) {
                                         Text(
-                                            // The write failing is not "nothing happened": revokeSessionTrust
-                                            // already ran (McpPolicyEngine.revokePersistedPolicy), so the tool
-                                            // genuinely asks again for the rest of this session even though the
-                                            // saved rule itself could not be cleared.
+                                            // Session trust clears even on failure, but a saved ALLOW still
+                                            // permits calls. Do not promise ASK while that durable rule remains.
                                             text =
-                                                "Saved rule unchanged; session trust cleared until restart. " +
+                                                "Saved rule unchanged; this tool's session trust was cleared. " +
                                                     "See the host log.",
                                             fontSize = 11.sp,
                                             color = colors.alert,

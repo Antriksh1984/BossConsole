@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Fault explaining why the MCP policy state is degraded or cannot be persisted.
@@ -46,12 +47,14 @@ sealed interface McpPolicyFault {
  * In-memory session trust ([trustForSession]) allows an operator to approve a tool
  * for the duration of the current application run without writing a permanent rule.
  */
+@Suppress("TooManyFunctions") // Policy resolution, approval guards and durable updates share one state and lock.
 class McpPolicyEngine(
     private val policyFile: File? = null,
     private val onFault: (McpPolicyFault) -> Unit = {},
 ) {
     private val logger = BossLogger.forComponent("McpPolicyEngine")
     private val lock = Any()
+    private val revocations = ConcurrentHashMap<String, Long>()
     private val json =
         Json {
             ignoreUnknownKeys = true
@@ -66,6 +69,24 @@ class McpPolicyEngine(
 
     private val _sessionTrustedTools = MutableStateFlow<Set<String>>(emptySet())
     val sessionTrustedTools: StateFlow<Set<String>> = _sessionTrustedTools.asStateFlow()
+
+    /** Capture before reading policy; a reset invalidates every older authorization. */
+    internal fun revocationVersion(toolName: String): Long = revocations[toolName] ?: 0L
+
+    /** Final authorization boundary. Session grants and operator resets use the same lock. */
+    internal fun confirmInvocation(
+        toolName: String,
+        expectedRevocation: Long,
+        grantSessionTrust: Boolean,
+    ): Boolean =
+        synchronized(lock) {
+            if (revocationVersion(toolName) != expectedRevocation || policyFor(toolName) == McpPolicyAction.DENY) {
+                false
+            } else {
+                if (grantSessionTrust) trustForSession(toolName)
+                true
+            }
+        }
 
     /**
      * Resolve the effective policy action for [toolName].
@@ -160,8 +181,12 @@ class McpPolicyEngine(
         toolName: String,
         action: McpPolicyAction,
         preserveDeny: Boolean = false,
+        expectedRevocation: Long? = null,
     ): Boolean =
         synchronized(lock) {
+            if (expectedRevocation != null && revocationVersion(toolName) != expectedRevocation) {
+                return@synchronized false
+            }
             if (preserveDeny && policyFor(toolName) == McpPolicyAction.DENY) return@synchronized false
             applyRules(
                 toolName,
@@ -200,17 +225,23 @@ class McpPolicyEngine(
      * since a revoke that did not actually take effect on disk is worse than useless: the UI
      * would show the tool as reset while the file, and the next restart, still say otherwise.
      */
-    fun revokePersistedPolicy(toolName: String): Boolean {
-        revokeSessionTrust(toolName)
-        return synchronized(lock) {
-            applyRules(
-                toolName,
-                _config.value.rules - toolName,
-                successMessage = "Revoked persisted tool policy",
-                failureMessage = "Failed to persist MCP policy revocation",
-            )
+    fun revokePersistedPolicy(toolName: String): Boolean =
+        synchronized(lock) {
+            // Even a failed reset invalidates queued answers. The previous durable rule remains
+            // visible on failure, but an older answer cannot restore trust behind this reset.
+            revokeSessionTrust(toolName)
+            val saved =
+                applyRules(
+                    toolName,
+                    _config.value.rules - toolName,
+                    successMessage = "Revoked persisted tool policy",
+                    failureMessage = "Failed to persist MCP policy revocation",
+                )
+            // Publish last: a caller observing this version must also see the reset policy.
+            // Calls that captured the previous version cannot pass the locked approval guard.
+            revocations[toolName] = revocationVersion(toolName) + 1
+            saved
         }
-    }
 
     // An absent file uses defaults; I/O and JSON failures withhold tools.
     @Suppress("ReturnCount", "TooGenericExceptionCaught")
