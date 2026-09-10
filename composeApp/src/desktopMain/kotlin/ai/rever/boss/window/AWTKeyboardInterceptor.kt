@@ -64,6 +64,34 @@ object AWTKeyboardInterceptor {
     private const val MIN_SHIFT_RELEASE_MS = 50
 
     /**
+     * A shortcut chord recognized on KEY_PRESSED and held until its primary key's matching
+     * KEY_RELEASED fires it - BossConsole#490: an action must not run while its keys are
+     * still held, and must not re-fire on OS auto-repeat KEY_PRESSED events.
+     *
+     * Exactly one of [hostBinding] / [pluginActionId] is set. A host binding can be probed
+     * (see [dispatchAction]'s `perform` parameter) before arming, so [handleKeyPressed] only
+     * arms one that would actually dispatch. [PluginShortcutRegistryImpl.dispatch] has no
+     * side-effect-free equivalent, so a plugin default arms on chord match alone and is
+     * confirmed for real at release time in [handleKeyReleased].
+     */
+    internal data class PendingShortcut(
+        val keyCode: Int,
+        val windowId: String,
+        val hostBinding: BindingMatch? = null,
+        val pluginActionId: String? = null,
+    )
+
+    // The shortcut armed on a currently-held key, or null. Process-global like the double-
+    // shift and tab-cycle state above, for the same reason: a chord armed in one window and
+    // released after focus moved elsewhere is a narrow, harmless mismatch, not a leak - the
+    // stray release just finds nothing to fire. Accessed only from the AWT event dispatch
+    // thread and the focus-loss listener installed alongside the dispatcher, both of which
+    // run there.
+    internal var pendingShortcut: PendingShortcut? = null
+
+    private var focusListener: java.beans.PropertyChangeListener? = null
+
+    /**
      * Register an AWT window with its BOSS window ID.
      * Call this from BossWindow's DisposableEffect when window is created.
      */
@@ -194,95 +222,39 @@ object AWTKeyboardInterceptor {
                     return@KeyEventDispatcher false
                 }
 
-                // Only intercept KEY_PRESSED events for other shortcuts
-                if (event.id != KeyEvent.KEY_PRESSED) {
+                // Only shortcuts from here on, and only these two event kinds.
+                if (event.id != KeyEvent.KEY_PRESSED && event.id != KeyEvent.KEY_RELEASED) {
                     return@KeyEventDispatcher false
                 }
 
-                // Skip if no modifier keys are pressed (most shortcuts require modifiers)
-                if (!event.isMetaDown && !event.isControlDown && !event.isAltDown) {
-                    return@KeyEventDispatcher false
-                }
-
-                // Skip modifier-only key presses
-                if (isModifierOnlyKey(event.keyCode)) {
-                    return@KeyEventDispatcher false
-                }
-
-                // Get the focused window's BOSS window ID
-                val focusedWindow = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusedWindow
-                val windowId = findWindowId(focusedWindow) ?: return@KeyEventDispatcher false
-
-                // Try to match the key event against shortcuts
-                val match = findMatchingBinding(event)
-                val binding = match?.binding
-
-                if (binding != null) {
-                    // Dispatch the action through MenuActionsHandler
-                    val handled = dispatchAction(binding.actionId, windowId)
-                    if (!handled) {
-                        // A host binding matched but has no dispatch case here, because the
-                        // chord is served further down or by nothing at all. QUICK_SWITCHER_OPEN
-                        // (Ctrl+Space) and TEST_EXTERNAL_LINK (Cmd+Shift+G) are the two that
-                        // reach this today, and every EDITOR_* binding would join them if
-                        // updateWindowContext were ever wired up.
-                        //
-                        // NOT the EDITOR bindings today: detectCurrentContext can only answer
-                        // BROWSER, TERMINAL or GLOBAL, so isContextEligible drops an
-                        // EDITOR-context binding in findMatchingBinding and it never gets here.
-                        // EDITOR_GO_TO_LINE (Cmd+L) is therefore kept safe from a plugin GLOBAL
-                        // default by the fluck browser not registering one, not by this branch.
-                        //
-                        // Return rather than fall through to the plugin-default pass below. That
-                        // pass is documented as running only when NO host binding matched, and
-                        // letting an undispatched host binding fall into it inverts the rule:
-                        // whichever plugin registered the same chord as a GLOBAL default would
-                        // shadow the host binding AND consume the event (a plugin's onAction
-                        // returns Unit, so PluginShortcutRegistryImpl.dispatch reports success
-                        // for any registered action), leaving the real handler with nothing.
-                        return@KeyEventDispatcher false
+                val handled =
+                    if (event.id == KeyEvent.KEY_RELEASED) {
+                        // Uses the windowId captured when the chord was armed, not whatever is
+                        // focused now - if focus moved, the listener below already cleared
+                        // pendingShortcut and this finds nothing to fire.
+                        handleKeyReleased(event)
+                    } else {
+                        val focusedWindow = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusedWindow
+                        val windowId = findWindowId(focusedWindow)
+                        windowId != null && handleKeyPressed(event, windowId)
                     }
 
-                    // Begin (or continue) an MRU tab cycle: remember which modifier is
-                    // sustaining it so its release - and only its release - commits the cycle.
-                    // This arms even when the focused panel has <=1 tab (the component-side
-                    // switchTab/commit then no-op), so the interceptor may briefly believe a
-                    // cycle is active when none is - harmless, and Tab stays swallowed.
-                    if ((binding.actionId == KeymapActions.TAB_NEXT || binding.actionId == KeymapActions.TAB_PREVIOUS) &&
-                        KeymapSettingsManager.currentSettings.value.tabSwitchMode == TabSwitchMode.MRU
-                    ) {
-                        tabCycleActive = true
-                        // From the keystroke that MATCHED, not the binding's primary: an
-                        // alternate can carry the other primary modifier, and arming on Meta
-                        // while the user holds Control means the release never commits. The
-                        // switcher overlay then stays on screen with Tab swallowed until some
-                        // unrelated modifier release happens to match.
-                        tabCycleModifierKeyCode = cyclingModifierKeyCode(match.keystroke)
-                    }
+                if (handled) {
                     // Consume the event to prevent it from reaching BossTerm
                     event.consume()
-                    return@KeyEventDispatcher true
                 }
-
-                // Plugin-contributed GLOBAL shortcuts (PluginShortcutRegistry).
-                // Host bindings always win — this pass only runs when no host
-                // binding matched. User rebinds live in the keymap settings under
-                // the plugin actionId (matched by the pass above); a spec's
-                // defaultBinding applies only while the keymap has no entry for
-                // that actionId.
-                val pluginActionId = findMatchingPluginDefault(event)
-                if (pluginActionId != null) {
-                    val handled = PluginShortcutRegistryImpl.dispatch(pluginActionId, windowId)
-                    if (handled) {
-                        event.consume()
-                        return@KeyEventDispatcher true
-                    }
-                }
-
-                false // Let event propagate normally
+                handled
             }
 
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(dispatcher)
+        focusListener =
+            java.beans.PropertyChangeListener {
+                // Focus moved (another window, another app, or none) while a chord was held:
+                // BossConsole#490 requires this to drop any pending shortcut rather than fire
+                // it, or leave it armed, for whichever key happens to release next.
+                cancelPendingShortcut()
+            }
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addPropertyChangeListener("focusedWindow", focusListener)
         isInstalled = true
     }
 
@@ -295,9 +267,156 @@ object AWTKeyboardInterceptor {
             KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(d)
         }
         dispatcher = null
+        focusListener?.let { l ->
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().removePropertyChangeListener("focusedWindow", l)
+        }
+        focusListener = null
         isInstalled = false
         windowIdMap.clear()
         windowContextMap.clear()
+        cancelPendingShortcut()
+    }
+
+    /**
+     * Recognize a shortcut chord on KEY_PRESSED and arm it - never invokes anything;
+     * BossConsole#490 requires the bound action to fire only on the matching key-up, which
+     * [handleKeyReleased] does. Returns whether the press should be consumed (kept from the
+     * focused component, e.g. BossTerm).
+     *
+     * `internal` - not just to let [install]'s dispatcher reach it - so a test can drive
+     * KEY_PRESSED handling with a synthetic AWT event and an explicit windowId, without
+     * registering a real AWT [Window].
+     */
+    internal fun handleKeyPressed(
+        event: KeyEvent,
+        windowId: String,
+    ): Boolean {
+        // A repeat KEY_PRESSED for the primary key already armed: keep claiming it (so it
+        // doesn't leak to the focused component while held) without re-matching, re-arming,
+        // or invoking anything a second time. This is what stops OS auto-repeat from firing
+        // the action over and over - the actual fire happens once, in handleKeyReleased.
+        pendingShortcut?.let { armed ->
+            if (event.keyCode == armed.keyCode) return true
+        }
+
+        // Skip if no modifier keys are pressed (most shortcuts require modifiers)
+        if (!event.isMetaDown && !event.isControlDown && !event.isAltDown) {
+            return false
+        }
+
+        // Skip modifier-only key presses
+        if (isModifierOnlyKey(event.keyCode)) {
+            return false
+        }
+
+        // Try to match the key event against shortcuts
+        val match = findMatchingBinding(event)
+        val binding = match?.binding
+
+        if (binding != null) {
+            // Probe only (perform = false): decide claimed-vs-not with the SAME gate
+            // handleKeyReleased will use to actually fire, evaluated now so the press-time
+            // claim decision matches this interceptor's pre-#490 timing. A narrow race exists
+            // if the gate's answer changes between this probe and the eventual fire (e.g. the
+            // last other panel closes while the chord is held) - accepted, since the
+            // alternative is a second predicate mirroring dispatchAction's `when` that could
+            // drift from it, which is exactly the kind of duplication this codebase avoids
+            // elsewhere (see AGENTS.md on blockingDependentsOf).
+            val wouldHandle = dispatchAction(binding.actionId, windowId, perform = false)
+            if (!wouldHandle) {
+                // A host binding matched but has no dispatch case here, because the chord is
+                // served further down or by nothing at all. QUICK_SWITCHER_OPEN (Ctrl+Space)
+                // and TEST_EXTERNAL_LINK (Cmd+Shift+G) are the two that reach this today, and
+                // every EDITOR_* binding would join them if updateWindowContext were ever
+                // wired up.
+                //
+                // NOT the EDITOR bindings today: detectCurrentContext can only answer
+                // BROWSER, TERMINAL or GLOBAL, so isContextEligible drops an EDITOR-context
+                // binding in findMatchingBinding and it never gets here. EDITOR_GO_TO_LINE
+                // (Cmd+L) is therefore kept safe from a plugin GLOBAL default by the fluck
+                // browser not registering one, not by this branch.
+                //
+                // Return rather than fall through to the plugin-default pass below. That pass
+                // is documented as running only when NO host binding matched, and letting an
+                // undispatched host binding fall into it inverts the rule: whichever plugin
+                // registered the same chord as a GLOBAL default would shadow the host binding
+                // AND consume the event (a plugin's onAction returns Unit, so
+                // PluginShortcutRegistryImpl.dispatch reports success for any registered
+                // action), leaving the real handler with nothing.
+                return false
+            }
+
+            pendingShortcut = PendingShortcut(keyCode = event.keyCode, windowId = windowId, hostBinding = match)
+            return true
+        }
+
+        // Plugin-contributed GLOBAL shortcuts (PluginShortcutRegistry).
+        // Host bindings always win — this pass only runs when no host
+        // binding matched. User rebinds live in the keymap settings under
+        // the plugin actionId (matched by the pass above); a spec's
+        // defaultBinding applies only while the keymap has no entry for
+        // that actionId.
+        val pluginActionId = findMatchingPluginDefault(event)
+        if (pluginActionId != null) {
+            // No side-effect-free way to ask PluginShortcutRegistryImpl "would you handle
+            // this" without actually dispatching, so this arms on chord match alone and is
+            // confirmed for real at key-up in handleKeyReleased.
+            pendingShortcut =
+                PendingShortcut(keyCode = event.keyCode, windowId = windowId, pluginActionId = pluginActionId)
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * Fire an armed shortcut when its primary key is released - the only place a
+     * BossConsole#490 shortcut actually invokes anything. Returns whether the release should
+     * be consumed.
+     *
+     * A released key that doesn't match [pendingShortcut] - including a modifier released by
+     * itself, since a modifier can never BE [PendingShortcut.keyCode] - invokes nothing and
+     * is not consumed.
+     */
+    internal fun handleKeyReleased(event: KeyEvent): Boolean {
+        val pending = pendingShortcut ?: return false
+        if (event.keyCode != pending.keyCode) return false
+        pendingShortcut = null
+
+        return if (pending.pluginActionId != null) {
+            PluginShortcutRegistryImpl.dispatch(pending.pluginActionId, pending.windowId)
+        } else {
+            val binding = pending.hostBinding!!.binding
+            val handled = dispatchAction(binding.actionId, pending.windowId, perform = true)
+
+            // Begin (or continue) an MRU tab cycle: remember which modifier is sustaining it
+            // so its release - and only its release - commits the cycle. This arms even when
+            // the focused panel has <=1 tab (the component-side switchTab/commit then no-op),
+            // so the interceptor may briefly believe a cycle is active when none is -
+            // harmless, and Tab stays swallowed.
+            if (handled &&
+                (binding.actionId == KeymapActions.TAB_NEXT || binding.actionId == KeymapActions.TAB_PREVIOUS) &&
+                KeymapSettingsManager.currentSettings.value.tabSwitchMode == TabSwitchMode.MRU
+            ) {
+                tabCycleActive = true
+                // From the keystroke that MATCHED, not the binding's primary: an alternate can
+                // carry the other primary modifier, and arming on Meta while the user holds
+                // Control means the release never commits. The switcher overlay then stays on
+                // screen with Tab swallowed until some unrelated modifier release happens to
+                // match.
+                tabCycleModifierKeyCode = cyclingModifierKeyCode(pending.hostBinding.keystroke)
+            }
+            handled
+        }
+    }
+
+    /**
+     * Clear any shortcut armed on KEY_PRESSED but not yet fired - BossConsole#490's
+     * cancellation requirement. Called on focus loss (the listener [install] registers) and
+     * on [uninstall]; safe to call when nothing is pending.
+     */
+    internal fun cancelPendingShortcut() {
+        pendingShortcut = null
     }
 
     /**
@@ -637,13 +756,18 @@ object AWTKeyboardInterceptor {
     /**
      * Run [trigger] and claim the event, but only while [windowId]'s active panel has more than
      * one tab. Returning false leaves the chord to the focused component.
+     *
+     * [perform] gates only [trigger] - the gate check above it always runs, so a `perform =
+     * false` probe (see [dispatchAction]) answers "would this claim the chord" without the
+     * side effect.
      */
     internal fun dispatchIfCanStepTabs(
         windowId: String,
+        perform: Boolean = true,
         trigger: (String) -> Unit,
     ): Boolean {
         if (!MenuActionsHandler.canStepTabs(windowId)) return false
-        trigger(windowId)
+        if (perform) trigger(windowId)
         return true
     }
 
@@ -660,10 +784,11 @@ object AWTKeyboardInterceptor {
     internal fun dispatchIfTabExistsAt(
         windowId: String,
         index: Int,
+        perform: Boolean = true,
         trigger: (String) -> Unit,
     ): Boolean {
         if (MenuActionsHandler.activePanelTabCount(windowId) <= index) return false
-        trigger(windowId)
+        if (perform) trigger(windowId)
         return true
     }
 
@@ -675,11 +800,12 @@ object AWTKeyboardInterceptor {
      */
     internal fun dispatchIfMultiPanel(
         windowId: String,
+        perform: Boolean = true,
         trigger: (String) -> Unit,
     ): Boolean {
         val panelCount = MenuActionsHandler.panelCountState.value[windowId] ?: 1
         if (panelCount <= 1) return false
-        trigger(windowId)
+        if (perform) trigger(windowId)
         return true
     }
 
@@ -690,30 +816,38 @@ object AWTKeyboardInterceptor {
      * Internal rather than private so desktopTest can assert which actions the interceptor
      * claims: returning false is load-bearing, because it is what leaves a chord to the
      * component that really serves it.
+     *
+     * [perform] defaults to true (dispatch for real - every existing caller's behaviour is
+     * unchanged). [handleKeyPressed] calls this once with `perform = false` to probe whether a
+     * host binding WOULD dispatch, without the side effect, so it can decide whether to arm a
+     * [PendingShortcut] for [handleKeyReleased] to actually fire later - see BossConsole#490.
+     * A gate (a `dispatchIf*` helper, or [ClosedTabHistory.hasEntries] below) always still
+     * runs; `perform` only gates the trigger itself.
      */
     internal fun dispatchAction(
         actionId: String,
         windowId: String,
+        perform: Boolean = true,
     ): Boolean =
         when (actionId) {
             // Tab Management
             KeymapActions.TAB_NEW -> {
-                MenuActionsHandler.triggerNewTab(windowId)
+                if (perform) MenuActionsHandler.triggerNewTab(windowId)
                 true
             }
 
             KeymapActions.TAB_CLOSE -> {
-                MenuActionsHandler.triggerCloseTab(windowId)
+                if (perform) MenuActionsHandler.triggerCloseTab(windowId)
                 true
             }
 
             KeymapActions.TAB_NEXT -> {
-                MenuActionsHandler.triggerNextTab(windowId)
+                if (perform) MenuActionsHandler.triggerNextTab(windowId)
                 true
             }
 
             KeymapActions.TAB_PREVIOUS -> {
-                MenuActionsHandler.triggerPreviousTab(windowId)
+                if (perform) MenuActionsHandler.triggerPreviousTab(windowId)
                 true
             }
 
@@ -724,7 +858,7 @@ object AWTKeyboardInterceptor {
                 if (!ClosedTabHistory.hasEntries(windowId)) {
                     false
                 } else {
-                    MenuActionsHandler.triggerReopenClosedTab(windowId)
+                    if (perform) MenuActionsHandler.triggerReopenClosedTab(windowId)
                     true
                 }
             }
@@ -733,55 +867,55 @@ object AWTKeyboardInterceptor {
             // nowhere to step, and claiming the chord would take Cmd+Shift+Bracket away from an
             // editor (where the VS Code and IntelliJ presets put these) for no effect.
             KeymapActions.TAB_NEXT_POSITIONAL -> {
-                dispatchIfCanStepTabs(windowId) { MenuActionsHandler.triggerNextTabPositional(it) }
+                dispatchIfCanStepTabs(windowId, perform) { MenuActionsHandler.triggerNextTabPositional(it) }
             }
 
             KeymapActions.TAB_PREVIOUS_POSITIONAL -> {
-                dispatchIfCanStepTabs(windowId) { MenuActionsHandler.triggerPreviousTabPositional(it) }
+                dispatchIfCanStepTabs(windowId, perform) { MenuActionsHandler.triggerPreviousTabPositional(it) }
             }
 
             // Index 0, not 8: Cmd+9 means "the last tab", so any non-empty panel serves it. In a
             // one-tab panel it is claimed and reselects the already-active tab, which is what
             // browsers do; only an empty panel lets the chord through.
             KeymapActions.TAB_SELECT_LAST -> {
-                dispatchIfTabExistsAt(windowId, 0) { MenuActionsHandler.triggerSelectLastTab(it) }
+                dispatchIfTabExistsAt(windowId, 0, perform) { MenuActionsHandler.triggerSelectLastTab(it) }
             }
 
             // Window Management
             KeymapActions.WINDOW_NEW -> {
-                WindowOperations.createNewWindow()
+                if (perform) WindowOperations.createNewWindow()
                 true
             }
 
             KeymapActions.WINDOW_CLOSE -> {
-                WindowOperations.closeWindow(windowId)
+                if (perform) WindowOperations.closeWindow(windowId)
                 true
             }
 
             // Browser Controls (Zoom)
             KeymapActions.BROWSER_ZOOM_IN -> {
-                MenuActionsHandler.triggerZoomIn(windowId)
+                if (perform) MenuActionsHandler.triggerZoomIn(windowId)
                 true
             }
 
             KeymapActions.BROWSER_ZOOM_OUT -> {
-                MenuActionsHandler.triggerZoomOut(windowId)
+                if (perform) MenuActionsHandler.triggerZoomOut(windowId)
                 true
             }
 
             KeymapActions.BROWSER_ZOOM_RESET -> {
-                MenuActionsHandler.triggerActualSize(windowId)
+                if (perform) MenuActionsHandler.triggerActualSize(windowId)
                 true
             }
 
             // View Controls
             KeymapActions.FOCUS_MODE_TOGGLE -> {
-                MenuActionsHandler.triggerToggleFocusMode(windowId)
+                if (perform) MenuActionsHandler.triggerToggleFocusMode(windowId)
                 true
             }
 
             KeymapActions.CHROME_DENSITY_CYCLE -> {
-                MenuActionsHandler.triggerChromeDensityCycle(windowId)
+                if (perform) MenuActionsHandler.triggerChromeDensityCycle(windowId)
                 true
             }
 
@@ -795,40 +929,40 @@ object AWTKeyboardInterceptor {
             // (With a split open the chord is the user's panel navigation either way - that is
             // already what the enabled menu accelerator does today.)
             KeymapActions.PANEL_NAVIGATE_LEFT -> {
-                dispatchIfMultiPanel(windowId) { MenuActionsHandler.triggerNavigatePanelLeft(it) }
+                dispatchIfMultiPanel(windowId, perform) { MenuActionsHandler.triggerNavigatePanelLeft(it) }
             }
 
             KeymapActions.PANEL_NAVIGATE_RIGHT -> {
-                dispatchIfMultiPanel(windowId) { MenuActionsHandler.triggerNavigatePanelRight(it) }
+                dispatchIfMultiPanel(windowId, perform) { MenuActionsHandler.triggerNavigatePanelRight(it) }
             }
 
             KeymapActions.PANEL_NAVIGATE_UP -> {
-                dispatchIfMultiPanel(windowId) { MenuActionsHandler.triggerNavigatePanelUp(it) }
+                dispatchIfMultiPanel(windowId, perform) { MenuActionsHandler.triggerNavigatePanelUp(it) }
             }
 
             KeymapActions.PANEL_NAVIGATE_DOWN -> {
-                dispatchIfMultiPanel(windowId) { MenuActionsHandler.triggerNavigatePanelDown(it) }
+                dispatchIfMultiPanel(windowId, perform) { MenuActionsHandler.triggerNavigatePanelDown(it) }
             }
 
             // Split Panel
             KeymapActions.PANEL_SPLIT_VERTICAL -> {
-                MenuActionsHandler.triggerSplitVertically(windowId)
+                if (perform) MenuActionsHandler.triggerSplitVertically(windowId)
                 true
             }
 
             KeymapActions.PANEL_SPLIT_HORIZONTAL -> {
-                MenuActionsHandler.triggerSplitHorizontally(windowId)
+                if (perform) MenuActionsHandler.triggerSplitHorizontally(windowId)
                 true
             }
 
             // Browser Controls
             KeymapActions.BROWSER_RELOAD -> {
-                MenuActionsHandler.triggerReloadBrowser(windowId)
+                if (perform) MenuActionsHandler.triggerReloadBrowser(windowId)
                 true
             }
 
             KeymapActions.BROWSER_FIND -> {
-                MenuActionsHandler.triggerBrowserFind(windowId)
+                if (perform) MenuActionsHandler.triggerBrowserFind(windowId)
                 true
             }
 
@@ -840,47 +974,47 @@ object AWTKeyboardInterceptor {
             // actions do need `enabled`, because an accelerator fires window-wide whatever the
             // context - see ActiveBrowserRegistry.windowsWithActiveBrowser.)
             KeymapActions.BROWSER_BACK -> {
-                MenuActionsHandler.triggerBrowserBack(windowId)
+                if (perform) MenuActionsHandler.triggerBrowserBack(windowId)
                 true
             }
 
             KeymapActions.BROWSER_FORWARD -> {
-                MenuActionsHandler.triggerBrowserForward(windowId)
+                if (perform) MenuActionsHandler.triggerBrowserForward(windowId)
                 true
             }
 
             KeymapActions.BROWSER_DEVTOOLS -> {
-                MenuActionsHandler.triggerBrowserDevTools(windowId)
+                if (perform) MenuActionsHandler.triggerBrowserDevTools(windowId)
                 true
             }
 
             // Codebase
             KeymapActions.CODEBASE_OPEN -> {
-                MenuActionsHandler.triggerOpenCodebase(windowId)
+                if (perform) MenuActionsHandler.triggerOpenCodebase(windowId)
                 true
             }
 
             // Global Search
             KeymapActions.GLOBAL_SEARCH_OPEN -> {
-                MenuActionsHandler.triggerOpenGlobalSearch(windowId)
+                if (perform) MenuActionsHandler.triggerOpenGlobalSearch(windowId)
                 true
             }
 
             // Settings
             KeymapActions.SETTINGS_OPEN -> {
-                MenuActionsHandler.triggerOpenSettings(windowId)
+                if (perform) MenuActionsHandler.triggerOpenSettings(windowId)
                 true
             }
 
             // Workspace
             KeymapActions.WORKSPACE_SAVE -> {
-                MenuActionsHandler.triggerSaveWorkspace(windowId)
+                if (perform) MenuActionsHandler.triggerSaveWorkspace(windowId)
                 true
             }
 
             // Help
             KeymapActions.HELP_SHORTCUTS -> {
-                MenuActionsHandler.triggerShowShortcutHelp(windowId)
+                if (perform) MenuActionsHandler.triggerShowShortcutHelp(windowId)
                 true
             }
 
@@ -890,7 +1024,7 @@ object AWTKeyboardInterceptor {
                 val tabIndex = KeymapActions.TAB_SELECT_BY_INDEX.indexOf(actionId)
                 when {
                     tabIndex >= 0 -> {
-                        dispatchIfTabExistsAt(windowId, tabIndex) {
+                        dispatchIfTabExistsAt(windowId, tabIndex, perform) {
                             MenuActionsHandler.triggerSelectTabByIndex(it, tabIndex)
                         }
                     }
@@ -899,7 +1033,10 @@ object AWTKeyboardInterceptor {
                     // reached when the user rebound a plugin shortcut (the binding
                     // then lives in the keymap settings and matches the main pass).
                     actionId.startsWith(PluginShortcutRegistryImpl.ACTION_ID_PREFIX) -> {
-                        PluginShortcutRegistryImpl.dispatch(actionId, windowId)
+                        // No side-effect-free probe exists for a plugin dispatch (unlike the
+                        // gates above), so a perform = false call optimistically reports
+                        // claimed; handleKeyReleased confirms for real at perform = true.
+                        if (perform) PluginShortcutRegistryImpl.dispatch(actionId, windowId) else true
                     }
 
                     else -> {

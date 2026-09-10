@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -59,31 +61,57 @@ fun Modifier.interceptKeyboardShortcuts(
     val matcher = remember(settings) { KeymapMatcher(settings) }
     val coroutineScope = rememberCoroutineScope()
 
+    // The key currently armed by a matched KeyDown, or null - BossConsole#490: emitting (which
+    // is what eventually invokes the bound action) must wait for the matching KeyUp, not fire on
+    // KeyDown itself, and must not re-fire on repeat KeyDown events while the key is held. Mirrors
+    // AWTKeyboardInterceptor.handleKeyPressed/handleKeyReleased, the other entry point this
+    // matches against the same KeymapMatcher.
+    var armedKey by remember { mutableStateOf<Key?>(null) }
+
     return this.onPreviewKeyEvent { keyEvent ->
-        // Only handle key down events
-        if (keyEvent.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-
-        // Skip modifier-only keys
-        if (keyEvent.key in MODIFIER_ONLY_KEYS) return@onPreviewKeyEvent false
-
-        // Check if this key combo matches any shortcut
-        val binding = matcher.match(keyEvent, context)
-
-        if (binding != null) {
-            // Emit to KeyboardEventBus for action execution
-            coroutineScope.launch {
-                KeyboardEventBus.emit(
-                    KeyboardEvent(
-                        keyEvent = keyEvent,
-                        source = source,
-                        context = context,
-                        sourceWindowId = windowId,
-                    ),
-                )
+        when (keyEvent.type) {
+            KeyEventType.KeyUp -> {
+                val armed = armedKey
+                if (armed != null && keyEvent.key == armed) {
+                    armedKey = null
+                    coroutineScope.launch {
+                        KeyboardEventBus.emit(
+                            KeyboardEvent(
+                                keyEvent = keyEvent,
+                                source = source,
+                                context = context,
+                                sourceWindowId = windowId,
+                            ),
+                        )
+                    }
+                    true // Consume the event - don't let wrapped component handle it
+                } else {
+                    false
+                }
             }
-            true // Consume the event - don't let wrapped component handle it
-        } else {
-            false // Let wrapped component handle regular input
+
+            KeyEventType.KeyDown -> {
+                // A repeat KeyDown for the key already armed: keep claiming it (so it doesn't
+                // leak to the wrapped component while held) without re-matching or re-arming -
+                // this is what stops OS auto-repeat from emitting more than once.
+                if (armedKey == keyEvent.key) return@onPreviewKeyEvent true
+
+                // Skip modifier-only keys
+                if (keyEvent.key in MODIFIER_ONLY_KEYS) return@onPreviewKeyEvent false
+
+                // Check if this key combo matches any shortcut - recognized now, but not
+                // emitted until the matching KeyUp above.
+                if (matcher.match(keyEvent, context) != null) {
+                    armedKey = keyEvent.key
+                    true // Consume the event - don't let wrapped component handle it
+                } else {
+                    false // Let wrapped component handle regular input
+                }
+            }
+
+            else -> {
+                false
+            }
         }
     }
 }
