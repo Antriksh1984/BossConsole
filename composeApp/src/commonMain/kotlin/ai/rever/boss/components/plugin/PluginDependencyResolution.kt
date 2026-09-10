@@ -3,12 +3,11 @@ package ai.rever.boss.components.plugin
 import ai.rever.boss.plugin.api.PluginDependency
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
-import ai.rever.boss.utils.logging.BossLogger
-import ai.rever.boss.utils.logging.LogCategory
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.receiveAsFlow
-import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.transform
 
 /**
  * A dependency a just-installed plugin declares but which is not present.
@@ -495,7 +494,7 @@ data class MissingDependencyPrompt(
  * An event bus rather than a direct call because the install runs in
  * `PluginLoaderDelegateImpl`, which has no window, no Compose scope and no idea whether a
  * UI exists at all - the same reason `TerminalLinkEventBus` exists, though not the same
- * delivery (see [prompts]).
+ * delivery (see [pending]).
  *
  * **Only user-initiated installs and re-activations emit here.** Startup restore and the api
  * hot-swap's reload-all both go through `DynamicPluginManager.installPlugin` directly, and a
@@ -508,8 +507,6 @@ data class MissingDependencyPrompt(
  * windows would have.
  */
 open class PluginDependencyBus {
-    private val logger = BossLogger.forComponent("PluginDependencyBus")
-
     /**
      * Missing plugins the user has already declined, for this process only.
      *
@@ -523,14 +520,6 @@ open class PluginDependencyBus {
     private val declined =
         java.util.concurrent.ConcurrentHashMap
             .newKeySet<String>()
-
-    /**
-     * Missing plugins with a prompt already waiting, so the buffer is not spent on duplicates.
-     *
-     * Three consumers of one gateway report three prompts and the collector discards two on
-     * arrival - but they occupy slots first.
-     */
-    private val queued = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Records a dismissal so the same question stops being asked this session.
@@ -557,40 +546,82 @@ open class PluginDependencyBus {
         }
 
     /**
-     * A channel, not a `SharedFlow`, because exactly one window must ask.
+     * The single source of truth for what is waiting to be asked, keyed like [decline]. Guards
+     * every read and write with [lock] so admission ("is a prompt already live for this key")
+     * and claiming ("give me that exact prompt, once") are each one atomic step - not a map
+     * lookup a caller has to remember to pair correctly.
      *
-     * A broadcast would put an identical dialog in front of every open window, and each of
-     * them could start the same install - so this is not a smaller version of the right
-     * thing, it is the wrong delivery semantics. Channel receive hands each prompt to a
-     * single collector.
+     * A map, not a bounded `Channel`, on purpose (BossConsole#465 review). A channel's fixed
+     * capacity can silently drop an already-admitted prompt once enough *other*, genuinely
+     * distinct prompts are pending at once - a live probe on this exact class proved it:
+     * report one, receive it, admit four unrelated ones (filling a four-slot channel), then
+     * re-send the first - refused, and gone. A map has no such ceiling to overflow. It also
+     * closes a second, sharper gap the same review found: the old design freed its dedup guard
+     * the instant a prompt was *handed to a collector*, not when the collector was actually
+     * done with it - so a second, independent `report()` for the same key, arriving while the
+     * first prompt was merely in transit toward the right window, was admitted as a competing
+     * second entry. Here, a key stays reserved by [report] until [claim] (or an explicit
+     * decline/install-elsewhere) removes it - there is no gap where the key is
+     * reserved-but-empty for something else to slip into.
      *
-     * Buffered, so reporting never suspends the installer and a prompt raised before any
-     * window exists is asked as soon as one appears rather than lost.
-     *
-     * Left on the default suspend-on-overflow policy and only ever written with `trySend`:
-     * a `DROP_OLDEST` channel always accepts, so the overflow would be invisible, and the
-     * oldest prompt is the one the user is most likely part-way through answering. A full
-     * buffer refuses the newest and says so instead.
+     * `LinkedHashMap`, not `ConcurrentHashMap`: iteration order matters (the oldest prompt is
+     * the one a user is most likely part-way through answering, so it should sort first in a
+     * scan), and `synchronized` gives that for free since every access already goes through
+     * [lock] for the compound admit/claim logic anyway - a `ConcurrentHashMap`'s per-call
+     * atomicity would not help here and would still need external locking for the two-step
+     * "check both name-scoped keys" logic [report] already does.
      */
-    private val prompts = Channel<MissingDependencyPrompt>(capacity = 4)
+    private val pending = LinkedHashMap<String, MissingDependencyPrompt>()
+    private val lock = Any()
 
+    /**
+     * Wakes every collector to re-scan [pending]. Replay of 1 so a collector that starts after
+     * a report() still gets a signal to run its first scan, rather than waiting for a change
+     * that already happened; [tryEmit] never suspends, so [report] - called from an install
+     * path with no UI to wait on - never blocks on this either.
+     */
+    private val changed = MutableSharedFlow<Unit>(replay = 1)
+
+    /**
+     * A snapshot of [pending] at this instant, oldest first. Never returns the live map: a
+     * collector iterating it while another thread claims or admits would be undefined.
+     */
+    private fun snapshot(): List<MissingDependencyPrompt> = synchronized(lock) { pending.values.toList() }
+
+    /**
+     * Every open window collects the same broadcast and independently decides, via
+     * [shouldClaimMissingDependencyPrompt], whether a given prompt is its to show - then calls
+     * [claim] before acting on it. Re-scanning on a bounded interval as well as on every
+     * [changed] signal is the fallback for the one case no signal fires for: the prompt's
+     * preferred window closing with nobody reporting anything new. A single bus-owned ticker,
+     * not one wait-and-retry loop per rejected prompt per window (the shape the prior
+     * `reofferMissingDependencyPrompt` had, and exactly what the review's "unbounded routing
+     * hops" finding was about) - this bounds total wakeups to one merged stream per collecting
+     * window, however many prompts happen to be pending at once.
+     */
     val missingDependencies =
-        prompts
-            .receiveAsFlow()
-            // Freed on the way out, not when the dialog is answered: the collector may decline to
-            // show this one (already installed, or declined since), and a slot held for a prompt
-            // nobody will ever show is what `queued` exists to avoid.
-            .onEach { prompt -> queued.remove(declineKey(prompt.missing)) }
+        merge(changed, ticker())
+            .transform { snapshot().forEach { prompt -> emit(prompt) } }
+
+    private fun ticker() =
+        flow {
+            while (true) {
+                delay(MISSING_DEPENDENCY_RESCAN_INTERVAL_MS)
+                emit(Unit)
+            }
+        }
 
     /**
      * Non-suspending on purpose, so the install path never waits on a UI.
      *
-     * Filters here and not only in the collector, because a prompt the collector is certain to
-     * discard still costs a buffer slot on the way through - and with four slots, that can be
-     * what refuses a different dependency which could have been shown.
+     * `putIfAbsent`-shaped: a key already pending keeps its *first* reporter's prompt (and
+     * therefore its [MissingDependencyPrompt.windowId]) rather than being overwritten by a
+     * second, independent report for the same key - the other half of the review finding
+     * [pending]'s KDoc describes. The second report is simply redundant: the first prompt
+     * already asks the identical question and, once shown, [shouldShowMissingDependency]
+     * re-checks presence at that point anyway.
      */
     fun report(prompt: MissingDependencyPrompt) {
-        val missingPluginId = prompt.missing.missingPluginId
         // Keyed like a decline, not by bare id: an optional prompt already waiting would
         // otherwise swallow a *required* one for the same plugin, and declining the optional
         // dialog would then silence the plugin that actually requires it.
@@ -599,22 +630,40 @@ open class PluginDependencyBus {
         // second click while the dialog is already up does not stack another copy of it. See
         // [MissingDependencyPrompt.userInitiated].
         val silenced = !prompt.userInitiated && wasDeclined(prompt.missing)
-        if (silenced || !queued.add(declineKey(prompt.missing))) return
-        if (prompts.trySend(prompt).isFailure) {
-            queued.remove(declineKey(prompt.missing))
-            // DROP_OLDEST is silent, and a prompt that never appears is indistinguishable
-            // from a feature that does not exist. Say so somewhere.
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Dropped a missing-dependency prompt",
-                mapOf(
-                    "dependent" to prompt.missing.dependentPluginId,
-                    "missing" to prompt.missing.missingPluginId,
-                ),
-            )
-        }
+        if (silenced) return
+        val key = declineKey(prompt.missing)
+        val admitted =
+            synchronized(lock) {
+                if (pending.containsKey(key)) {
+                    false
+                } else {
+                    pending[key] = prompt
+                    true
+                }
+            }
+        if (admitted) changed.tryEmit(Unit)
     }
+
+    /**
+     * Atomically takes [prompt] out of [pending] for the caller that wins the race - a losing
+     * racer (another window's collector, woken by the same broadcast) gets `false` and does
+     * nothing further: there is no second dialog to suppress and no re-report to issue, because
+     * the prompt was never removed out from under it in the first place.
+     */
+    internal fun claim(prompt: MissingDependencyPrompt): Boolean =
+        synchronized(lock) {
+            val key = declineKey(prompt.missing)
+            if (pending[key] === prompt) {
+                pending.remove(key)
+                true
+            } else {
+                false
+            }
+        }
 }
+
+/** How often [PluginDependencyBus.missingDependencies] re-broadcasts with no new report. */
+private const val MISSING_DEPENDENCY_RESCAN_INTERVAL_MS = 1000L
 
 /**
  * Whether a prompt that reached a window should be put on screen.
@@ -642,13 +691,14 @@ fun shouldShowMissingDependency(
  * Whether the window at [collectorWindowId] should show [prompt] itself, rather than leave it
  * for [MissingDependencyPrompt.windowId]'s own window.
  *
- * [PluginDependencyBus] delivers over a `Channel`, which hands each prompt to exactly one
- * collector - whichever window's `collect` happens to be ready first, not necessarily the one
- * whose install raised it. This function is the other half of closing that gap: a window that
- * gets a prompt meant for someone else calls [PluginDependencyBus.report] again with the same
- * prompt rather than showing it, so it goes back into the channel for another window - hopefully
- * the right one - to try. That "put it back" behaviour lives at the collector, not here; this is
- * only the yes/no decision, kept pure and testable the same way [shouldShowMissingDependency] is.
+ * [PluginDependencyBus.missingDependencies] broadcasts every pending prompt to every open
+ * window, not necessarily the one whose install raised it. This function is the other half of
+ * routing correctly: a window that is not the preferred one for [prompt] simply does not call
+ * [PluginDependencyBus.claim] and leaves the prompt in place for [MissingDependencyPrompt.windowId]'s
+ * own window (or, if that window has since closed, for the bus's periodic re-scan to hand to
+ * whichever window claims it next). That "leave it alone" behaviour lives at the collector, not
+ * here; this is only the yes/no decision, kept pure and testable the same way
+ * [shouldShowMissingDependency] is.
  *
  * [targetWindowOpen] is passed in rather than resolved here for the same reason: whether a window
  * id is still live is a `WindowFocusManager` question, and this function should stay answerable

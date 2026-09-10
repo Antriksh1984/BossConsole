@@ -4,11 +4,12 @@ import ai.rever.boss.plugin.api.PluginDependency
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.loader.ApiClassLoader
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -569,6 +570,19 @@ class PluginDependencyBusTest {
             noopInstaller,
         )
 
+    /**
+     * What a real collector does before acting on a prompt: try to claim it, and if that fails
+     * (another collector won the race, or it was never meant for this one), keep waiting. Bus
+     * tests use this rather than a bare `.first()` because [PluginDependencyBus.missingDependencies]
+     * broadcasts to every collector - claiming, not receiving, is what actually hands a prompt to
+     * exactly one caller now. Window-routing itself ([shouldClaimMissingDependencyPrompt]) is
+     * covered separately in [MissingDependencyPromptRoutingTest].
+     */
+    private suspend fun PluginDependencyBus.claimNext(): MissingDependencyPrompt {
+        val stream = missingDependencies
+        return stream.first { claim(it) }
+    }
+
     @Test
     fun `reporting with nobody collecting neither suspends nor throws`() {
         // The installer calls this from a plugin-install path: it must never block on a UI
@@ -584,38 +598,91 @@ class PluginDependencyBusTest {
             val collectors =
                 List(2) {
                     launch {
-                        received +=
-                            bus.missingDependencies
-                                .first()
-                                .missing.missingPluginId
+                        received += bus.claimNext().missing.missingPluginId
                     }
                 }
             runCurrent()
 
             bus.report(prompt("com.example.once"))
-            advanceUntilIdle()
+            runCurrent()
             collectors.forEach { it.cancel() }
 
             assertEquals(listOf("com.example.once"), received)
         }
 
     @Test
-    fun `a full buffer refuses the newest and keeps the ones already waiting`() =
+    fun `claim is atomic - exactly one of two simultaneous callers wins the same prompt`() =
         runTest {
             val bus = PluginDependencyBus()
-            // Capacity is 4. The fifth has nowhere to go.
-            for (n in 1..5) bus.report(prompt("com.example.p$n"))
+            val target = prompt("com.example.race")
+            bus.report(target)
 
-            val delivered =
-                (1..4).map {
-                    bus.missingDependencies
-                        .first()
-                        .missing.missingPluginId
-                }
+            val results = listOf(async { bus.claim(target) }, async { bus.claim(target) }).map { it.await() }
 
-            // Not DROP_OLDEST: the oldest prompt is the one a user is most likely part-way
-            // through answering, and a channel that always accepts makes the drop invisible.
-            assertEquals(listOf("com.example.p1", "com.example.p2", "com.example.p3", "com.example.p4"), delivered)
+            assertEquals(listOf(true, false), results.sortedDescending())
+        }
+
+    @Test
+    fun `BossConsole465 - a prompt is never lost while genuinely distinct prompts are also pending`() =
+        runTest {
+            // The review's own reproduction, replayed here: report one, receive it (without
+            // claiming - the "wrong window" case), admit four unrelated ones, then have the
+            // rejecting collector's re-check find it still there. Under the old bounded-channel
+            // design, receiving freed the dedup guard immediately and re-sending competed with
+            // the four unrelated prompts for the channel's four slots - the original was refused
+            // and gone. A map has no capacity to overflow, and the guard is not freed until
+            // something actually [PluginDependencyBus.claim]s the prompt, so there is nothing
+            // here for a concurrent report to slip past.
+            val bus = PluginDependencyBus()
+            val original = prompt("com.example.original")
+            bus.report(original)
+            val seenByRejectingCollector = bus.missingDependencies.first()
+            repeat(4) { bus.report(prompt("com.example.other$it")) }
+
+            assertEquals(original, seenByRejectingCollector)
+            assertTrue(bus.claim(original), "the original prompt must still be claimable")
+            // And every genuinely distinct prompt admitted alongside it is claimable too - no
+            // capacity ceiling means none of the five was ever at risk of the others.
+            val remaining = (1..4).map { bus.claimNext().missing.missingPluginId }.toSet()
+            assertEquals((0..3).map { "com.example.other$it" }.toSet(), remaining)
+        }
+
+    @Test
+    fun `a duplicate report for a key still pending does not replace its routing info`() =
+        runTest {
+            // The review's second finding: a later, independent report for the same key used to
+            // insert a competing second entry once the first prompt's dedup guard had already
+            // been (prematurely) freed. Now the guard lives until claim(), so the first report's
+            // prompt - and its windowId - is what stays live.
+            val bus = PluginDependencyBus()
+            val depMissing = missing("com.example.d", "com.example.gateway", optional = false)
+            val first = MissingDependencyPrompt(depMissing, noopInstaller, windowId = "window-a")
+            val second = MissingDependencyPrompt(depMissing, noopInstaller, windowId = "window-b")
+
+            bus.report(first)
+            bus.report(second)
+
+            assertEquals("window-a", bus.missingDependencies.first().windowId)
+        }
+
+    @Test
+    fun `a collector that never claims a prompt leaves it available, even if cancelled`() =
+        runTest {
+            // No reoffer step exists any more: a collector that decides a prompt is not its to
+            // show simply never calls claim(), so there is nothing for its own cancellation to
+            // strand - unlike the old design's throttle-delay window between report()-ing a
+            // rejected prompt back and actually re-sending it.
+            val bus = PluginDependencyBus()
+            val target = prompt("com.example.rejected")
+            bus.report(target)
+
+            val rejectingCollector = launch { bus.missingDependencies.first() }
+            runCurrent()
+            rejectingCollector.cancel()
+            rejectingCollector.join()
+
+            assertEquals(target, withTimeoutOrNull(1) { bus.missingDependencies.first() })
+            assertTrue(bus.claim(target))
         }
 
     @Test
@@ -629,12 +696,7 @@ class PluginDependencyBusTest {
             bus.report(promptFor(missing("com.example.second", "com.example.gateway", optional = true)))
             bus.report(promptFor(missing("com.example.second", "com.example.other", optional = true)))
 
-            assertEquals(
-                "com.example.other",
-                bus.missingDependencies
-                    .first()
-                    .missing.missingPluginId,
-            )
+            assertEquals("com.example.other", bus.claimNext().missing.missingPluginId)
         }
 
     @Test
@@ -650,12 +712,7 @@ class PluginDependencyBusTest {
             assertFalse(bus.wasDeclined(other))
             bus.report(promptFor(other))
 
-            assertEquals(
-                "com.example.gateway",
-                bus.missingDependencies
-                    .first()
-                    .missing.missingPluginId,
-            )
+            assertEquals("com.example.gateway", bus.claimNext().missing.missingPluginId)
         }
 
     @Test
@@ -670,7 +727,7 @@ class PluginDependencyBusTest {
         }
 
     @Test
-    fun `two dependents of one missing plugin occupy a single slot`() =
+    fun `two dependents of one missing plugin share a single pending prompt`() =
         runTest {
             val bus = PluginDependencyBus()
 
@@ -678,15 +735,11 @@ class PluginDependencyBusTest {
             bus.report(prompt("com.example.gateway"))
             bus.report(prompt("com.example.other"))
 
-            // The collector would discard the duplicate on arrival, but it costs a slot first -
-            // and with four slots that can be what refuses a different, still-relevant prompt.
+            // The duplicate report for the same key must be a no-op, so both this and the
+            // genuinely distinct prompt stay independently claimable.
             assertEquals(
                 listOf("com.example.gateway", "com.example.other"),
-                (1..2).map {
-                    bus.missingDependencies
-                        .first()
-                        .missing.missingPluginId
-                },
+                (1..2).map { bus.claimNext().missing.missingPluginId },
             )
         }
 
@@ -701,37 +754,22 @@ class PluginDependencyBusTest {
 
             // Both must survive: keyed by bare id, the required one was dropped, the user saw only
             // "Recommended / Not now", and declining that silenced the plugin that required it.
-            val delivered =
-                (1..2).map {
-                    bus.missingDependencies
-                        .first()
-                        .missing.optional
-                }
+            val delivered = (1..2).map { bus.claimNext().missing.optional }
             assertEquals(listOf(true, false), delivered)
         }
 
     @Test
-    fun `a plugin can be reported again once its prompt has been taken`() =
+    fun `a plugin can be reported again once its prompt has been claimed`() =
         runTest {
             val bus = PluginDependencyBus()
 
             bus.report(prompt("com.example.gateway"))
-            assertEquals(
-                "com.example.gateway",
-                bus.missingDependencies
-                    .first()
-                    .missing.missingPluginId,
-            )
+            assertEquals("com.example.gateway", bus.claimNext().missing.missingPluginId)
 
-            // Consuming frees the slot: a second dependent installed later must still be able to
+            // Claiming frees the key: a second dependent installed later must still be able to
             // raise it, otherwise the dedup would become a permanent mute.
             bus.report(prompt("com.example.gateway"))
-            assertEquals(
-                "com.example.gateway",
-                bus.missingDependencies
-                    .first()
-                    .missing.missingPluginId,
-            )
+            assertEquals("com.example.gateway", bus.claimNext().missing.missingPluginId)
         }
 
     @Test

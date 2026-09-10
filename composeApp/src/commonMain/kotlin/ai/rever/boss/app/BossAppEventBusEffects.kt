@@ -18,7 +18,6 @@ import ai.rever.boss.components.plugin.DependentRestartEventBus
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
 import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
-import ai.rever.boss.components.plugin.reofferMissingDependencyPrompt
 import ai.rever.boss.components.plugin.resolveRegisteredPanelId
 import ai.rever.boss.components.plugin.shouldClaimMissingDependencyPrompt
 import ai.rever.boss.components.plugin.shouldShowMissingDependency
@@ -234,12 +233,12 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
     LaunchedEffect(windowId) {
         PluginDependencyEventBus.missingDependencies
             .collect { prompt ->
-                // The prompt may name a specific reporting window (best-effort - see
-                // MissingDependencyPrompt.windowId). If it does, is still open, and it is not
-                // us, this window is the wrong audience: hand it back rather than showing it
-                // here, so the right window gets a chance to collect it next. Return it before
-                // suspending: cancellation of this window must not strand another window's
-                // prompt during the throttle delay.
+                // Every open window sees the same broadcast. The prompt may name a specific
+                // reporting window (best-effort - see MissingDependencyPrompt.windowId); if it
+                // does, is still open, and it is not us, this window is the wrong audience -
+                // leave the prompt exactly where it is (still pending on the bus) rather than
+                // claiming it, so the right window's own collector - or, if that window closes
+                // first, the bus's periodic re-scan - picks it up instead.
                 val shouldClaim =
                     shouldClaimMissingDependencyPrompt(
                         prompt = prompt,
@@ -247,7 +246,12 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                         targetWindowOpen = prompt.windowId?.let { WindowFocusManager.isWindowOpen(it) } == true,
                     )
                 if (!shouldClaim) {
-                    reofferMissingDependencyPrompt(PluginDependencyEventBus, prompt)
+                    return@collect
+                }
+                // Take ownership before acting on it: another window's collector may have been
+                // woken by the same broadcast and reached this same decision concurrently, and
+                // only one of us may proceed. A losing claim means someone else already has it.
+                if (!PluginDependencyEventBus.claim(prompt)) {
                     return@collect
                 }
                 // Re-check rather than trusting the report: two dependents of one missing
@@ -277,11 +281,12 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                 state.installingMissingDependency = false
                 state.missingDependencyError = null
                 state.pendingMissingPluginDependency = prompt
-                // Back-pressure instead of a queue: the next prompt stays in the channel until
-                // this one is answered, so a second missing dependency is asked about after the
-                // first rather than replacing it or being dropped. Cancelling this effect (the
-                // window closing) leaves whatever is still in the channel for another window -
-                // though a prompt already received here and not yet shown does go with it.
+                // Back-pressure instead of a queue: this collect loop does not move on to the
+                // next broadcast emission until this one is answered, so a second missing
+                // dependency in this same window is asked about after the first rather than
+                // replacing it. The prompt is already claimed (removed from the bus) by this
+                // point, so cancelling this effect - the window closing mid-dialog - would strand
+                // it; that is an accepted, narrow gap, not a claim to loop back and reclaim it.
                 snapshotFlow { state.pendingMissingPluginDependency }.first { it == null }
             }
     }
