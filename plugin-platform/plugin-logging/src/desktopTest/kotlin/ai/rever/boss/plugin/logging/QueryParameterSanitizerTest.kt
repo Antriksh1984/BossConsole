@@ -16,7 +16,7 @@ class QueryParameterSanitizerTest {
     @Test
     fun `query and fragment separators allow every sensitive value to be redacted`() {
         listOf("?", "&", "#").forEach { prefix ->
-            listOf("token", "ACCESS_TOKEN", "apiKey", "client-secret").forEach { name ->
+            listOf("token", "ACCESS_TOKEN", "apiKey", "client-secret", "code", "ERROR_DESCRIPTION").forEach { name ->
                 val message = "${prefix}$name=alpha:omega&next=a:b#password=gamma:delta"
                 assertEquals(
                     "${prefix}$name=[REDACTED]&next=a:b#password=[REDACTED]",
@@ -24,6 +24,22 @@ class QueryParameterSanitizerTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun `OAuth URL names redact without hiding free text diagnostic codes`() {
+        listOf("code", "error_description").forEach { name ->
+            val message = "Failed https://example.com/cb?$name=alpha:omega retry"
+            assertEquals("Failed https:[PATH] retry", LogSanitizer.sanitizeExceptionMessage(message))
+            assertEquals("Failed https:[PATH] retry", LogSanitizer.sanitizeStackTrace(message))
+            assertEquals(
+                "boss://auth?$name=[REDACTED]",
+                LogSanitizer.maskUriParams("boss://auth?$name=alpha:omega"),
+            )
+        }
+        val diagnostic = "code=404 exit_code=1 status_code=500 error_code=404"
+        assertEquals(diagnostic, LogSanitizer.sanitizeLogMessage(diagnostic))
+        assertEquals(mapOf("exit_code" to 1), LogSanitizer.sanitizeMap(mapOf("exit_code" to 1)))
     }
 
     @Test

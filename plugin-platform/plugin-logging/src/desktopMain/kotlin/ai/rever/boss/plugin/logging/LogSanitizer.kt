@@ -114,20 +114,6 @@ object LogSanitizer {
     fun maskUriParams(uri: String?): String {
         if (uri.isNullOrBlank()) return "[empty]"
 
-        val sensitiveParams =
-            setOf(
-                "token",
-                "access_token",
-                "refresh_token",
-                "code",
-                "error_description",
-                "id_token",
-                "session_token",
-                "api_key",
-                "key",
-                "secret",
-            )
-
         return try {
             // Handle both query params (?) and fragment params (#)
             var result = uri
@@ -135,13 +121,13 @@ object LogSanitizer {
             // Mask query parameters
             val queryStart = uri.indexOf('?')
             if (queryStart >= 0) {
-                result = maskParamsInSegment(result, queryStart + 1, '#', sensitiveParams)
+                result = maskParamsInSegment(result, queryStart + 1, '#', sensitiveUriParamNames)
             }
 
             // Mask fragment parameters
             val fragmentStart = result.indexOf('#')
             if (fragmentStart >= 0) {
-                result = maskParamsInSegment(result, fragmentStart + 1, '\u0000', sensitiveParams)
+                result = maskParamsInSegment(result, fragmentStart + 1, '\u0000', sensitiveUriParamNames)
             }
 
             result
@@ -320,9 +306,11 @@ object LogSanitizer {
     private val assignmentPattern = Regex("""(?<![A-Za-z0-9_.])([A-Za-z][A-Za-z0-9_.-]*)=([^\s\[][^\s]*)""")
 
     /**
-     * A sensitive-named query or fragment parameter inside a URL — `?token=…`,
+     * A sensitive-named query or fragment parameter shape — `?token=…`,
      * `&access_token=…`, `#access_token=…` — redacted before [filePathPattern]
-     * gets a chance to see it.
+     * gets a chance to see it. These shapes are redacted even without a full URL.
+     * Parameters use ampersand separators; legacy semicolon separators and
+     * percent-encoded parameter names are not interpreted by this text matcher.
      *
      * BossConsole#109 (review comment): [filePathPattern]'s `[^\s:]+` stops at
      * the first colon, on the (correct, elsewhere) assumption that a colon
@@ -347,6 +335,21 @@ object LogSanitizer {
 
     /** Inserts a word boundary into camelCase names, so `accessToken` splits like `access_token`. */
     private val camelCaseBoundary = Regex("""(?<=[a-z0-9])(?=[A-Z])""")
+
+    // Exact URL names stay separate: free-text exit_code and status_code are diagnostics.
+    private val sensitiveUriParamNames =
+        setOf(
+            "token",
+            "access_token",
+            "refresh_token",
+            "code",
+            "error_description",
+            "id_token",
+            "session_token",
+            "api_key",
+            "key",
+            "secret",
+        )
 
     /**
      * Names whose value is sensitive. Shared by [sanitizeMap] and the
@@ -465,7 +468,8 @@ object LogSanitizer {
         val withMaskedQueryParams =
             sensitiveQueryParamPattern.replace(text) { match ->
                 val (prefix, name, value) = match.destructured
-                if (nameMarksSecret(name) && value.lowercase() !in nonSecretValues) {
+                val sensitive = nameMarksSecret(name) || sensitiveUriParamNames.any { name.equals(it, ignoreCase = true) }
+                if (sensitive && value.lowercase() !in nonSecretValues) {
                     "$prefix$name=[REDACTED]"
                 } else {
                     match.value
