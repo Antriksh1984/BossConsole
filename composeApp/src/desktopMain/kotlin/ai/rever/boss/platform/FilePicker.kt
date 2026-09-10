@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.KeyboardFocusManager
 import java.io.File
 import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
@@ -135,25 +136,38 @@ actual fun pickSaveFile(
  * Desktop implementation of confirmExecutableDownload using a Swing confirm dialog.
  * Runs synchronously on the EDT, same threading requirement as [pickSaveFile].
  */
-actual fun confirmExecutableDownload(fileName: String): Boolean {
-    var proceed = false
-
-    try {
-        SwingUtilities.invokeAndWait {
-            val choice =
-                JOptionPane.showConfirmDialog(
-                    null,
-                    "\"$fileName\" is an executable file. Only download and run it if you trust its source.",
-                    "Confirm download",
-                    JOptionPane.OK_CANCEL_OPTION,
-                    JOptionPane.WARNING_MESSAGE,
-                )
-            proceed = choice == JOptionPane.OK_OPTION
-        }
-    } catch (e: Exception) {
-        filePickerLogger.warn(LogCategory.FILE, "Error showing executable download warning", error = e)
-        proceed = false
+actual fun confirmExecutableDownload(fileName: String): Boolean =
+    confirmExecutableDownloadOnEdt {
+        val options = arrayOf("Download", "Cancel")
+        JOptionPane.showOptionDialog(
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow,
+            "\"$fileName\" may be executable. Only download and run it if you trust its source.",
+            "Confirm download",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.WARNING_MESSAGE,
+            null,
+            options,
+            options[1],
+        )
     }
 
-    return proceed
+/** The dialog is injectable so consent, failure and EDT dispatch can be tested without a window. */
+internal fun confirmExecutableDownloadOnEdt(showDialog: () -> Int): Boolean {
+    var proceed = false
+    val prompt = Runnable { proceed = showDialog() == JOptionPane.OK_OPTION }
+    return try {
+        if (SwingUtilities.isEventDispatchThread()) {
+            prompt.run()
+        } else {
+            SwingUtilities.invokeAndWait(prompt)
+        }
+        proceed
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        filePickerLogger.warn(LogCategory.FILE, "Executable download warning interrupted", error = e)
+        false
+    } catch (e: Exception) {
+        filePickerLogger.warn(LogCategory.FILE, "Error showing executable download warning", error = e)
+        false
+    }
 }

@@ -3257,20 +3257,21 @@ object FluckEngine {
                     if (!FileSystemUtils.ensureParentDirectoryExists(savePath)) {
                         // Bailing before setupDownloadEventListeners means none of the three
                         // terminal handlers will run, so the claim is released here or never.
-                        FileSystemUtils.releaseFilePath(savePath, owner = downloadId)
-                        action.cancel()
+                        cancelPendingDownload(savePath, downloadId, downloadUrl, activeDownloadUrls, action::cancel)
                         return@StartDownloadCallback
                     }
 
                     // Warn for executable files
-                    if (downloadSettings.warnForExecutables &&
-                        FileNameSanitizer.isExecutableFile(sanitizedFileName) &&
-                        !confirmExecutableDownload(savedFileName)
+                    if (!executableDownloadAllowed(
+                            downloadSettings.warnForExecutables,
+                            sanitizedFileName,
+                            savedFileName,
+                            ::confirmExecutableDownload,
+                        )
                     ) {
                         // Same cleanup as the parent-directory-failure bail above: none of
                         // the three terminal handlers will run, so the claim is released here.
-                        FileSystemUtils.releaseFilePath(savePath, owner = downloadId)
-                        action.cancel()
+                        cancelPendingDownload(savePath, downloadId, downloadUrl, activeDownloadUrls, action::cancel)
                         return@StartDownloadCallback
                     }
 
@@ -3326,8 +3327,8 @@ object FluckEngine {
                     // Initiate the download
                     action.download(downloadPath)
                 } else {
-                    // User cancelled save dialog
-                    action.cancel()
+                    // No terminal listener is registered when the save dialog is cancelled.
+                    cancelPendingDownload(null, downloadId, downloadUrl, activeDownloadUrls, action::cancel)
                 }
             },
         )
