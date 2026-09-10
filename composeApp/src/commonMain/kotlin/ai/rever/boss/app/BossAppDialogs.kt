@@ -822,15 +822,15 @@ internal fun BossAppDialogs(state: BossAppState) {
     // Application-menu request to enable experimental Microkernel Mode (BossConsole#472) - the
     // Settings entry point shows its own copy of this dialog locally, since that composable
     // already owns a scope to hold the pending/error state in.
-    if (state.pendingMicrokernelModeConfirmation) {
+    if (state.microkernelModeConfirmation.pending) {
         ConfirmationDialog(
             title = "Enable experimental Microkernel Mode?",
             message = MICROKERNEL_MODE_CONFIRMATION_MESSAGE,
             confirmText = "Enable experimental mode",
-            onDismiss = { state.pendingMicrokernelModeConfirmation = false },
+            onDismiss = { state.microkernelModeConfirmation.cancel() },
             onConfirm = {
-                coroutineScope.launch {
-                    MicrokernelModePreference.setEnabled(true)
+                state.microkernelModeConfirmation.confirm {
+                    coroutineScope.launch { MicrokernelModePreference.save(true) }
                 }
             },
         )

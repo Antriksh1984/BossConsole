@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import java.io.File
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -109,5 +110,60 @@ class MicrokernelModePreferenceTest {
         // - must survive that, since they are what #472 is actually asking this dialog to say.
         assertTrue(MICROKERNEL_MODE_CONFIRMATION_MESSAGE.contains("experimental", ignoreCase = true))
         assertTrue(MICROKERNEL_MODE_CONFIRMATION_MESSAGE.contains("does not guarantee"))
+    }
+
+    @Test
+    fun `similarly named keys survive and duplicate mode assignments cannot defeat disable`() =
+        runTest {
+            val file = tempEnvFile()
+            file.writeText("BOSS_MODE_EXTRA=keep\n\t# BOSS_MODE=KERNEL\nBOSS_MODE=KERNEL\nOTHER=keep\n")
+            assertTrue(MicrokernelModePreference.setEnabled(false, file).isSuccess)
+            assertFalse(MicrokernelModePreference.isEnabled(file))
+            assertTrue(file.readLines().contains("BOSS_MODE_EXTRA=keep"))
+            assertTrue(file.readLines().contains("OTHER=keep"))
+        }
+
+    @Test
+    fun `last active assignment determines saved mode`() =
+        runTest {
+            val file = tempEnvFile()
+            file.writeText("BOSS_MODE=KERNEL\nBOSS_MODE=MONOLITH\n")
+            assertFalse(MicrokernelModePreference.isEnabled(file))
+        }
+
+    @Test
+    fun `menu and settings observe only successful saves and a later success clears failure`() =
+        runTest {
+            MicrokernelModePreference.saveAndPublish(false) { Result.success(Unit) }
+            val settings = MicrokernelModePreference.saveState
+            val menu = MicrokernelModePreference.saveState
+            MicrokernelModePreference.saveAndPublish(true) { Result.failure(java.io.IOException("blocked")) }
+            assertEquals(false, settings.value.enabled)
+            assertTrue(menu.value.saveFailed)
+            assertEquals("Microkernel Mode (save failed - retry)", microkernelModeMenuLabel(menu.value, false))
+            MicrokernelModePreference.saveAndPublish(true) { Result.success(Unit) }
+            assertEquals(true, settings.value.enabled)
+            assertFalse(menu.value.saveFailed)
+            assertEquals("Microkernel Mode (restart required)", microkernelModeMenuLabel(menu.value, false))
+            MicrokernelModePreference.saveAndPublish(false) { Result.success(Unit) }
+            assertEquals("Microkernel Mode", microkernelModeMenuLabel(menu.value, false))
+        }
+
+    @Test
+    fun `shared consent cancels without writing and confirms once`() {
+        val consent = MicrokernelModeConfirmation()
+        var writes = 0
+        consent.request()
+        assertTrue(consent.pending)
+        assertEquals(0, writes)
+        consent.cancel()
+        consent.confirm { writes++ }
+        assertFalse(consent.pending)
+        assertEquals(0, writes)
+        consent.request()
+        consent.confirm { writes++ }
+        consent.confirm { writes++ }
+        assertFalse(consent.pending)
+        assertEquals(1, writes)
     }
 }

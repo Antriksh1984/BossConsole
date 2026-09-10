@@ -1,7 +1,15 @@
 package ai.rever.boss.settings
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -25,34 +33,37 @@ const val MICROKERNEL_MODE_CONFIRMATION_MESSAGE =
         "The change takes effect after restarting BOSS. You can turn Microkernel Mode off and " +
         "restart again to return to normal mode."
 
-/**
- * The one place that reads and writes the persisted Microkernel Mode preference
- * (`BOSS_MODE=KERNEL` in `env_vars`).
- *
- * Before this existed, [ai.rever.boss.components.settings.sections.AdvancedSettings] and the
- * "Microkernel Mode" application-menu item each carried their own copy of this file-editing
- * logic, and had already drifted: the Settings copy created a missing `env_vars` file with a
- * comment explaining the key, the menu copy did not. BossConsole#472 asks for a confirmation
- * dialog "before any preference is written" reachable from both entry points using "the existing
- * shared preference-save path" (singular) - which this object *is*, not a description of
- * something that already existed.
- *
- * Deliberately outside the `kernel` package: that package is excluded entirely from Windows
- * ARM64 builds (no `boss-ipc` there), but this preference is plain file I/O with no such
- * dependency, and both its callers - Settings and the app menu - are not excluded. Living inside
- * `kernel` would have made this object vanish out from under them on exactly one platform.
- *
- * Read and write deliberately stay separate operations with separate meanings, not merged into
- * one: [isEnabled] answers "what does the saved preference currently say", used by both entry
- * points to decide whether a requested change is actually an off-to-on transition worth
- * confirming. Neither entry point's *displayed* checked state reads through here - Settings
- * reads the file live on every open (its checkbox can lag a menu-triggered write until reopened,
- * unchanged behavior), the menu item reads the environment/config the running process actually
- * started under (its checkbox cannot move until a restart makes that value stale by definition
- * either way) - changing which source each display trusts is out of scope for #472, which asks
- * for a confirmation dialog, not a display-consistency fix.
- */
+/** Shared persistence and save outcome for Settings and every application menu. */
 object MicrokernelModePreference {
+    private val mutex = Mutex()
+    private val _saveState = MutableStateFlow(MicrokernelModeSaveState())
+    internal val saveState = _saveState.asStateFlow()
+
+    suspend fun refresh() =
+        mutex.withLock {
+            _saveState.value = _saveState.value.copy(enabled = isEnabled())
+        }
+
+    /** Finish publication even if the window closes while the file write is in progress. */
+    internal suspend fun saveAndPublish(
+        enabled: Boolean,
+        write: suspend () -> Result<Unit>,
+    ): Result<Unit> =
+        withContext(NonCancellable) {
+            mutex.withLock {
+                val result = write()
+                _saveState.value =
+                    if (result.isSuccess) {
+                        MicrokernelModeSaveState(enabled = enabled)
+                    } else {
+                        _saveState.value.copy(saveFailed = true)
+                    }
+                result
+            }
+        }
+
+    suspend fun save(enabled: Boolean): Result<Unit> = saveAndPublish(enabled) { setEnabled(enabled) }
+
     /**
      * Whether the persisted preference currently requests Microkernel Mode.
      *
@@ -67,10 +78,10 @@ object MicrokernelModePreference {
                 envFile
                     .readLines(Charsets.UTF_8)
                     .filter { it.isNotBlank() && !it.startsWith("#") }
-                    .any { line ->
+                    .mapNotNull { line ->
                         val parts = line.split("=", limit = 2)
-                        parts.size == 2 && parts[0].trim() == "BOSS_MODE" && parts[1].trim() == "KERNEL"
-                    }
+                        if (parts.size == 2 && parts[0].trim() == "BOSS_MODE") parts[1].trim() else null
+                    }.lastOrNull() == "KERNEL"
             } catch (_: IOException) {
                 false
             }
@@ -102,18 +113,23 @@ object MicrokernelModePreference {
                 }
 
                 val lines = envFile.readLines(Charsets.UTF_8).toMutableList()
-                val modeLineIndex =
-                    lines.indexOfFirst { line ->
-                        line.trimStart('#', ' ').startsWith("BOSS_MODE")
+                val modeLineIndices =
+                    lines.indices.filter { index ->
+                        val key =
+                            lines[index]
+                                .trimStart()
+                                .removePrefix("#")
+                                .trimStart()
+                                .substringBefore("=")
+                                .trim()
+                        key == "BOSS_MODE"
                     }
                 val newLine = if (enabled) "BOSS_MODE=KERNEL" else "# BOSS_MODE=KERNEL"
-
-                if (modeLineIndex >= 0) {
-                    lines[modeLineIndex] = newLine
-                } else {
-                    lines.add("")
-                    lines.add("# Microkernel mode - enables out-of-process plugins, gRPC IPC, and AI self-healing")
+                if (modeLineIndices.isEmpty()) {
                     lines.add(newLine)
+                } else {
+                    lines[modeLineIndices.first()] = newLine
+                    modeLineIndices.drop(1).reversed().forEach { lines.removeAt(it) }
                 }
 
                 envFile.writeText(lines.joinToString("\n") + "\n", Charsets.UTF_8)
@@ -138,3 +154,38 @@ fun needsMicrokernelModeConfirmation(
     currentlyEnabled: Boolean,
     nextEnabled: Boolean,
 ): Boolean = nextEnabled && !currentlyEnabled
+
+internal data class MicrokernelModeSaveState(
+    val enabled: Boolean? = null,
+    val saveFailed: Boolean = false,
+)
+
+internal fun microkernelModeMenuLabel(
+    state: MicrokernelModeSaveState,
+    runningEnabled: Boolean,
+): String =
+    when {
+        state.saveFailed -> "Microkernel Mode (save failed - retry)"
+        state.enabled != null && state.enabled != runningEnabled -> "Microkernel Mode (restart required)"
+        else -> "Microkernel Mode"
+    }
+
+/** Local consent belongs to the initiating surface; a dismissal never calls persistence. */
+internal class MicrokernelModeConfirmation {
+    var pending by mutableStateOf(false)
+        private set
+
+    fun request() {
+        pending = true
+    }
+
+    fun cancel() {
+        pending = false
+    }
+
+    fun confirm(save: () -> Unit) {
+        if (!pending) return
+        pending = false
+        save()
+    }
+}

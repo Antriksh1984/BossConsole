@@ -190,7 +190,9 @@ internal class BossAppState(
     // on and is waiting for the operator to confirm it (BossConsole#472). The Settings entry
     // point shows its own copy of this dialog locally instead, since it already has a
     // composable scope to hold the state in.
-    var pendingMicrokernelModeConfirmation by mutableStateOf(false)
+    val microkernelModeConfirmation =
+        ai.rever.boss.settings
+            .MicrokernelModeConfirmation()
 
     // Snapshot of the in-progress MRU tab cycle, drives the Ctrl+Tab switcher overlay
     // (null in positional mode and whenever no cycle is active).

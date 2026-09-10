@@ -319,7 +319,7 @@ internal fun BossAppMenuActionEffects(
         MenuActionsHandler.confirmMicrokernelModeEvents
             .onEach { eventWindowId ->
                 if (eventWindowId == windowId) {
-                    state.pendingMicrokernelModeConfirmation = true
+                    state.microkernelModeConfirmation.request()
                 }
             }.launchIn(this)
     }

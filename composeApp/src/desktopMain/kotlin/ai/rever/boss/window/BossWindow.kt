@@ -27,6 +27,7 @@ import ai.rever.boss.plugin.ui.LocalHeavyweightOverlays
 import ai.rever.boss.services.editor.EditorAPIAccess
 import ai.rever.boss.services.terminal.TerminalAPIAccess
 import ai.rever.boss.settings.MicrokernelModePreference
+import ai.rever.boss.settings.microkernelModeMenuLabel
 import ai.rever.boss.settings.needsMicrokernelModeConfirmation
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.utils.CLIInstaller
@@ -378,6 +379,13 @@ fun ApplicationScope.BossWindow(
 
         // Coroutine scope for menu actions (like checking for updates)
         val menuScope = rememberCoroutineScope()
+        val microkernelSaveState by MicrokernelModePreference.saveState.collectAsState()
+        val runningKernelMode =
+            remember {
+                ai.rever.boss.config.ConfigLoader
+                    .getConfig("BOSS_MODE") == "KERNEL"
+            }
+        LaunchedEffect(Unit) { MicrokernelModePreference.refresh() }
 
         // Listen for panel registry changes to update the menu
         DisposableEffect(panelRegistry) {
@@ -512,21 +520,13 @@ fun ApplicationScope.BossWindow(
 
                 Separator()
 
-                // Process Mode toggle
-                val isKernelMode =
-                    remember {
-                        val mode =
-                            System.getenv("BOSS_MODE")
-                                ?: ai.rever.boss.config.ConfigLoader
-                                    .getConfig("BOSS_MODE")
-                        mode == "KERNEL"
-                    }
                 CheckboxItem(
-                    "Microkernel Mode",
-                    checked = isKernelMode,
+                    microkernelModeMenuLabel(microkernelSaveState, runningKernelMode),
+                    checked = microkernelSaveState.enabled ?: runningKernelMode,
+                    enabled = microkernelSaveState.enabled != null,
                     onCheckedChange = { requestedEnabled ->
                         if (needsMicrokernelModeConfirmation(
-                                currentlyEnabled = isKernelMode,
+                                currentlyEnabled = microkernelSaveState.enabled ?: runningKernelMode,
                                 nextEnabled = requestedEnabled,
                             )
                         ) {
@@ -537,7 +537,7 @@ fun ApplicationScope.BossWindow(
                         } else {
                             // Disabling stays a plain, un-confirmed toggle (BossConsole#472).
                             menuScope.launch {
-                                MicrokernelModePreference.setEnabled(requestedEnabled)
+                                MicrokernelModePreference.save(requestedEnabled)
                             }
                         }
                     },

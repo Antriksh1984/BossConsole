@@ -10,6 +10,7 @@ import ai.rever.boss.components.settings.shared.SettingsToggle
 import ai.rever.boss.performance.PerformanceSettingsManager
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.settings.MICROKERNEL_MODE_CONFIRMATION_MESSAGE
+import ai.rever.boss.settings.MicrokernelModeConfirmation
 import ai.rever.boss.settings.MicrokernelModePreference
 import ai.rever.boss.settings.needsMicrokernelModeConfirmation
 import androidx.compose.foundation.layout.*
@@ -28,42 +29,31 @@ import kotlinx.coroutines.launch
 fun AdvancedSettings() {
     val coroutineScope = rememberCoroutineScope()
 
-    // Read current BOSS_MODE from env_vars file
-    var kernelMode by remember { mutableStateOf(false) }
-    var needsRestart by remember { mutableStateOf(false) }
-    var saveError by remember { mutableStateOf(false) }
-    var pendingEnable by remember { mutableStateOf(false) }
-    val initialMode = remember { mutableStateOf<Boolean?>(null) }
+    val saveState by MicrokernelModePreference.saveState.collectAsState()
+    val kernelMode = saveState.enabled ?: false
+    val runningKernelMode =
+        remember {
+            ai.rever.boss.config.ConfigLoader
+                .getConfig("BOSS_MODE") == "KERNEL"
+        }
+    val needsRestart = saveState.enabled != null && kernelMode != runningKernelMode
+    val saveError = saveState.saveFailed
+    val confirmation = remember { MicrokernelModeConfirmation() }
 
-    LaunchedEffect(Unit) {
-        val mode = MicrokernelModePreference.isEnabled()
-        kernelMode = mode
-        initialMode.value = mode
-    }
+    LaunchedEffect(Unit) { MicrokernelModePreference.refresh() }
 
     fun applyMicrokernelMode(enabled: Boolean) {
-        coroutineScope.launch {
-            val result = MicrokernelModePreference.setEnabled(enabled)
-            if (result.isSuccess) {
-                saveError = false
-                kernelMode = enabled
-                needsRestart = enabled != initialMode.value
-            } else {
-                // Only a successful save updates the toggle or the restart notice - the
-                // preference on disk, and what this section shows, must never disagree.
-                saveError = true
-            }
-        }
+        coroutineScope.launch { MicrokernelModePreference.save(enabled) }
     }
 
-    if (pendingEnable) {
+    if (confirmation.pending) {
         ConfirmationDialog(
             title = "Enable experimental Microkernel Mode?",
             message = MICROKERNEL_MODE_CONFIRMATION_MESSAGE,
             confirmText = "Enable experimental mode",
             confirmColor = AccentColor,
-            onDismiss = { pendingEnable = false },
-            onConfirm = { applyMicrokernelMode(true) },
+            onDismiss = { confirmation.cancel() },
+            onConfirm = { confirmation.confirm { applyMicrokernelMode(true) } },
         )
     }
 
@@ -75,9 +65,10 @@ fun AdvancedSettings() {
             SettingsToggle(
                 label = "Microkernel Mode",
                 checked = kernelMode,
+                enabled = saveState.enabled != null,
                 onCheckedChange = { enabled ->
                     if (needsMicrokernelModeConfirmation(currentlyEnabled = kernelMode, nextEnabled = enabled)) {
-                        pendingEnable = true
+                        confirmation.request()
                     } else {
                         applyMicrokernelMode(enabled)
                     }
