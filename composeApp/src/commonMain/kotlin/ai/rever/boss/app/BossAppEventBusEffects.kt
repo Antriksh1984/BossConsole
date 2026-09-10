@@ -18,6 +18,7 @@ import ai.rever.boss.components.plugin.DependentRestartEventBus
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
 import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
+import ai.rever.boss.components.plugin.reofferMissingDependencyPrompt
 import ai.rever.boss.components.plugin.resolveRegisteredPanelId
 import ai.rever.boss.components.plugin.shouldClaimMissingDependencyPrompt
 import ai.rever.boss.components.plugin.shouldShowMissingDependency
@@ -61,7 +62,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -70,14 +70,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/**
- * How long a window waits before re-offering a missing-dependency prompt meant for another,
- * still-open window. Just long enough that the target window's own [LaunchedEffect] has almost
- * certainly reached its `collect` by the time this fires, without making the person who answered
- * from the wrong window notice a stall.
- */
-private const val MISSING_DEPENDENCY_REOFFER_DELAY_MS = 150L
 
 /**
  * Event-bus listeners for one BossApp window. Every bus is window-filtered by
@@ -245,9 +237,9 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                 // The prompt may name a specific reporting window (best-effort - see
                 // MissingDependencyPrompt.windowId). If it does, is still open, and it is not
                 // us, this window is the wrong audience: hand it back rather than showing it
-                // here, so the right window gets a chance to collect it next. A short delay
-                // avoids two non-target windows trading it back and forth in a tight loop
-                // while the target window's own LaunchedEffect is still starting up.
+                // here, so the right window gets a chance to collect it next. Return it before
+                // suspending: cancellation of this window must not strand another window's
+                // prompt during the throttle delay.
                 val shouldClaim =
                     shouldClaimMissingDependencyPrompt(
                         prompt = prompt,
@@ -255,8 +247,7 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                         targetWindowOpen = prompt.windowId?.let { WindowFocusManager.isWindowOpen(it) } == true,
                     )
                 if (!shouldClaim) {
-                    delay(MISSING_DEPENDENCY_REOFFER_DELAY_MS)
-                    PluginDependencyEventBus.report(prompt)
+                    reofferMissingDependencyPrompt(PluginDependencyEventBus, prompt)
                     return@collect
                 }
                 // Re-check rather than trusting the report: two dependents of one missing

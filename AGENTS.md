@@ -232,9 +232,12 @@ Deliberately out of scope, so nobody assumes more than exists:
   `loadPlugin` refuses outright and `DefaultPlugin` skips on scan, so it looks missing to every
   manifest naming it) and the api plugin (whose install is an unload-all / swap / reload-all hot
   swap, not something to start from a dialog about something else).
-- **With two windows open, the window that asks may not be the one that reported.** The install
-  is still correct; the answering window may just not show the change until relaunch. See
-  `MissingDependencyPrompt`.
+- **Window routing is best-effort and still needs queue-level repair.** Prompts can carry a
+  preferred window id; non-target collectors re-report before delaying their next receive.
+  Returning before suspension prevents cancellation during that delay from abandoning a prompt.
+  Report-time focus can differ from the initiating window, null targets remain unscoped, and
+  re-reporting still risks overflow, duplicate replacement and unbounded hops while a target is
+  busy. Do not treat this as guaranteed delivery to the initiating window or manager.
 - **The bus filters at report time, not only in the collector.** A prompt the collector is
   certain to discard - declined, or a duplicate of one already waiting - still costs one of four
   buffer slots on the way through, and that can be what refuses a different dependency which
@@ -331,9 +334,9 @@ installer factory), and it must not become an offer: the section falls back to t
 is composed inside the main window's subtree and opts *its own* dialogs out of heavyweight overlay
 routing precisely so they do not open centred on the main window - but the dependency dialog is
 raised through `PluginDependencyEventBus` and composed by `BossAppDialogs`, outside that opt-out. It
-is always-on-top so it is not lost, just not where the press happened. Routing it would mean the
-prompt carrying a window id, which is the same change `MissingDependencyPrompt` already records as
-not built for the two-window case.
+is always-on-top so it is not lost, just not where the press happened. The prompt now carries a
+best-effort BossWindow id, but Settings is not a registered BossWindow with its own dependency
+collector. Routing among BossWindows does not change this Settings placement limitation.
 
 **A raised offer is not a shown dialog.** `PluginDependencyEventBus.report` drops silently when a
 prompt for that plugin is already queued, so `offerIfMissing` returning true is not proof anything
