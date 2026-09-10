@@ -273,6 +273,53 @@ class SingleInstanceChannelTest {
     }
 
     @Test
+    fun `a plugin action without a usable id is refused`() {
+        assertTrue(SingleInstanceManager.acquireLock())
+        assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?action=ping"))
+        assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=&action=ping"))
+    }
+
+    @Test
+    fun `a timed out queued action never runs after the UI thread becomes available`() {
+        assertTrue(SingleInstanceManager.acquireLock())
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls =
+            java.util.concurrent.atomic
+                .AtomicInteger()
+        val handlerId = "timeout-test-handler"
+        ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+            .register(
+                object : ai.rever.boss.plugin.api.DeepLinkActionHandler {
+                    override val handlerId = handlerId
+
+                    override fun handle(
+                        action: String,
+                        params: Map<String, String>,
+                    ): Boolean {
+                        calls.incrementAndGet()
+                        return true
+                    }
+                },
+            )
+        javax.swing.SwingUtilities.invokeLater {
+            entered.countDown()
+            release.await(15, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        try {
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=$handlerId&action=run"))
+        } finally {
+            release.countDown()
+            // Drain the queued dispatch before inspecting its observable side effect.
+            javax.swing.SwingUtilities.invokeAndWait {}
+            ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+                .unregister(handlerId)
+        }
+        assertEquals(0, calls.get(), "a timed out action must not execute later from the Main queue")
+    }
+
+    @Test
     fun `a credential helper receives a token from the signed-in running instance`() {
         SingleInstanceManager.llmTokenProviderOverride = { Result.success("sk-short-lived-pilot") }
         assertTrue(SingleInstanceManager.acquireLock())

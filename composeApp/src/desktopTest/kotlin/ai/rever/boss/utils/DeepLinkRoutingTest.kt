@@ -134,7 +134,10 @@ class DeepLinkRoutingTest {
                 override fun handle(
                     action: String,
                     params: Map<String, String>,
-                ): Boolean = action == "ping"
+                ): Boolean {
+                    check(action != "throw") { "test failure" }
+                    return action == "ping"
+                }
             },
         )
         try {
@@ -143,6 +146,7 @@ class DeepLinkRoutingTest {
 
             val declined = awaitPluginActionVerdict("boss://plugin?id=$handlerId&action=unknown")
             assertFalse(declined, "a registered handler that declines the action must be reported as not handled")
+            assertFalse(awaitPluginActionVerdict("boss://plugin?id=$handlerId&action=throw"))
         } finally {
             DeepLinkActionRegistryImpl.unregister(handlerId)
         }

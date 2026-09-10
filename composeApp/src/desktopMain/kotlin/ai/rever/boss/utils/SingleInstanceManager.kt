@@ -1121,20 +1121,29 @@ object SingleInstanceManager {
                 // keeps today's fire-and-forget behaviour: RESPONSE_OK means
                 // only "queued". An action link is the one case with a real
                 // answer to await, so its OK/ERROR reflects whether the
-                // registered handler actually ran the action, not just that a
+                // registered handler reported the action handled, not just that a
                 // coroutine was launched for it.
                 if (verdict == null) {
                     RESPONSE_OK
                 } else {
                     val handled =
                         kotlinx.coroutines.runBlocking {
-                            kotlinx.coroutines.withTimeoutOrNull(OPEN_ACTION_TIMEOUT_MS) { verdict.await() }
+                            awaitPluginAction(verdict, OPEN_ACTION_TIMEOUT_MS)
                         }
-                    if (handled == true) {
-                        RESPONSE_OK
-                    } else {
-                        RESPONSE_ERROR_PREFIX +
-                            "Plugin action was not handled (unknown handler, declined, or timed out)"
+                    when (handled) {
+                        true -> {
+                            RESPONSE_OK
+                        }
+
+                        false -> {
+                            RESPONSE_ERROR_PREFIX + "Plugin action was not handled"
+                        }
+
+                        null -> {
+                            // Cancels an action still queued on Main. A synchronous handler
+                            // already running cannot be interrupted, so its outcome is unknown.
+                            RESPONSE_ERROR_PREFIX + "Plugin action outcome unknown (timed out); do not retry automatically"
+                        }
                     }
                 }
             }
@@ -1360,8 +1369,9 @@ object SingleInstanceManager {
      * @return true if the running instance acknowledged it. For most links this
      *   still means only "queued" (fire-and-forget, as before); for a
      *   `boss://plugin?id=…&action=…` link it now means the registered handler
-     *   actually ran the action — an unregistered handler id, a declined action,
-     *   or a timeout all return false instead of a blind acknowledgement.
+     *   reported the action handled. An unregistered handler id, a declined
+     *   action, or an unknown outcome at timeout returns false. This is not a
+     *   guarantee that asynchronous work started by a handler has completed.
      */
     fun sendToExistingInstance(
         url: String,

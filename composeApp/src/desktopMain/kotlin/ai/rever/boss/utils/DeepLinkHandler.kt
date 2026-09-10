@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -553,9 +554,8 @@ actual object DeepLinkHandler {
      *   [ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl.dispatch]'s
      *   own verdict (false for an unregistered handler id, a handler that
      *   declines the action, or one that throws — that function never lets an
-     *   exception escape). Null for a panel-open link and for the missing-`id`
-     *   case, both of which stay fire-and-forget: there is no wire caller today
-     *   that needs to know whether a panel actually opened.
+     *   exception escape). Null for a panel-open link, which stays fire-and-forget. An action
+     *   without a usable id is rejected with a false verdict.
      */
     private fun handlePluginLink(
         uri: String,
@@ -566,9 +566,9 @@ actual object DeepLinkHandler {
         val params = parseQueryParams(uri)
         val panelIdStr = params["id"]?.urlDecode()
 
-        if (panelIdStr == null) {
+        if (panelIdStr.isNullOrBlank()) {
             logger.warn(LogCategory.UI, "Missing 'id' parameter in plugin deep link")
-            return null
+            return if (params.containsKey("action")) CompletableDeferred(false) else null
         }
 
         // Action links dispatch to the plugin's DeepLinkActionHandler and do
@@ -594,14 +594,10 @@ actual object DeepLinkHandler {
             params
                 .filterKeys { it != "id" && it != "action" }
                 .mapValues { (_, value) -> value.urlDecode() }
-        val verdict = CompletableDeferred<Boolean>()
-        scope.launch(Dispatchers.Main) {
-            val handled =
-                ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
-                    .dispatch(handlerId, action, actionParams)
-            verdict.complete(handled)
+        return scope.async(Dispatchers.Main) {
+            ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+                .dispatch(handlerId, action, actionParams)
         }
-        return verdict
     }
 
     /** Opens a `boss://plugin?id=…` link's panel. Fire-and-forget: nothing awaits this today. */
