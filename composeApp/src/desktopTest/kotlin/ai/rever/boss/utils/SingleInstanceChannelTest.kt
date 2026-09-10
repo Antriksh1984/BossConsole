@@ -237,6 +237,42 @@ class SingleInstanceChannelTest {
     }
 
     @Test
+    fun `forwarding a plugin action link reports the handler's real outcome, not a blind OK`() {
+        // A boss://plugin?id=X&action=Y link used to be fire-and-forget: the
+        // forwarding instance always got RESPONSE_OK, whether or not a handler
+        // for X was even registered. Now the response reflects what actually
+        // happened, so an automation or CLI caller forwarding the link over
+        // this channel can tell a genuine success from a silent no-op.
+        assertTrue(SingleInstanceManager.acquireLock())
+
+        val handlerId = "channel-test-handler-${System.nanoTime()}"
+        ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+            .register(
+                object : ai.rever.boss.plugin.api.DeepLinkActionHandler {
+                    override val handlerId = handlerId
+
+                    override fun handle(
+                        action: String,
+                        params: Map<String, String>,
+                    ): Boolean = action == "ping"
+                },
+            )
+        try {
+            assertTrue(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=$handlerId&action=ping"))
+            assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=$handlerId&action=unknown"))
+        } finally {
+            ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+                .unregister(handlerId)
+        }
+
+        assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=no-such-handler&action=ping"))
+
+        // A plugin link that just opens a panel (no action) is unaffected: still
+        // reported as acknowledged, exactly like before this change.
+        assertTrue(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=bookmarks"))
+    }
+
+    @Test
     fun `a credential helper receives a token from the signed-in running instance`() {
         SingleInstanceManager.llmTokenProviderOverride = { Result.success("sk-short-lived-pilot") }
         assertTrue(SingleInstanceManager.acquireLock())

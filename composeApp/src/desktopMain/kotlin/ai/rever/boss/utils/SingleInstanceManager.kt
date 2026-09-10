@@ -92,6 +92,11 @@ private const val CONNECTION_TIMEOUT_MS = 10000L // 10 seconds - important for a
 private const val LLM_TOKEN_TIMEOUT_MS = 90000L
 private const val MCP_INVOKE_TIMEOUT_MS = 60000L
 
+// Well under CONNECTION_TIMEOUT_MS: VERB_OPEN gets the default socket budget (it is
+// not a longer-budget candidate), so this wait must leave room for that budget to
+// still close a genuinely wedged connection rather than race it.
+private const val OPEN_ACTION_TIMEOUT_MS = 5000L
+
 /**
  * Ceiling on a single request. Bounds what one caller can make the app buffer,
  * sized to accommodate Base64-encoded tool arguments and payloads.
@@ -1111,8 +1116,27 @@ object SingleInstanceManager {
                 // The forwarding instance states the URL's provenance; it is not
                 // inferred from the caller having held the token, which says
                 // nothing about where the URL came from.
-                DeepLinkHandler.processDeepLink(requireNotNull(request.url), request.origin)
-                RESPONSE_OK
+                val verdict = DeepLinkHandler.processDeepLink(requireNotNull(request.url), request.origin)
+                // Every route but a plugin action link returns null here and
+                // keeps today's fire-and-forget behaviour: RESPONSE_OK means
+                // only "queued". An action link is the one case with a real
+                // answer to await, so its OK/ERROR reflects whether the
+                // registered handler actually ran the action, not just that a
+                // coroutine was launched for it.
+                if (verdict == null) {
+                    RESPONSE_OK
+                } else {
+                    val handled =
+                        kotlinx.coroutines.runBlocking {
+                            kotlinx.coroutines.withTimeoutOrNull(OPEN_ACTION_TIMEOUT_MS) { verdict.await() }
+                        }
+                    if (handled == true) {
+                        RESPONSE_OK
+                    } else {
+                        RESPONSE_ERROR_PREFIX +
+                            "Plugin action was not handled (unknown handler, declined, or timed out)"
+                    }
+                }
             }
 
             request.verb == VERB_LLM_TOKEN -> {
@@ -1333,7 +1357,11 @@ object SingleInstanceManager {
      * @param origin what the caller knows about where [url] came from. Defaults to
      *   [DeepLinkOrigin.EXTERNAL], because a forwarded URL normally reached this
      *   process from the OS.
-     * @return true if the running instance acknowledged it.
+     * @return true if the running instance acknowledged it. For most links this
+     *   still means only "queued" (fire-and-forget, as before); for a
+     *   `boss://plugin?id=…&action=…` link it now means the registered handler
+     *   actually ran the action — an unregistered handler id, a declined action,
+     *   or a timeout all return false instead of a blind acknowledgement.
      */
     fun sendToExistingInstance(
         url: String,
