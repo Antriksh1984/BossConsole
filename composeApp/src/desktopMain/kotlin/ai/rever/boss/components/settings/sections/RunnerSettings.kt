@@ -31,6 +31,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
+/** The slider's granularity - one tick per 100ms of [MIN_RERUN_DELAY_MS]..[MAX_RERUN_DELAY_MS]. */
+private const val RERUN_DELAY_STEP_MS = 100L
+
 @Composable
 fun RunnerSettings() {
     val settings by RunnerSettingsManager.currentSettings.collectAsState()
@@ -104,7 +107,13 @@ fun RunnerSettings() {
                     }
                 },
                 valueRange = MIN_RERUN_DELAY_MS.toFloat()..MAX_RERUN_DELAY_MS.toFloat(),
-                steps = 19,
+                // Derived, not a literal (BossConsole#486 review): a Slider's steps is the count
+                // of dividers *between* the endpoints, so this many steps at this range is one
+                // per RERUN_DELAY_STEP_MS - changing MIN/MAX here alone used to leave the step
+                // size wherever a hardcoded 19 happened to land it (100ms only because 2000/19
+                // rounds there, one of the six divisors of the previous 0..2000 range that
+                // survives ktlint's Int rounding at all).
+                steps = ((MAX_RERUN_DELAY_MS - MIN_RERUN_DELAY_MS) / RERUN_DELAY_STEP_MS - 1).toInt(),
                 valueDisplay = { "${it.toInt()} ms" },
                 description = "Delay between Ctrl+C and the new command when re-running in the main panel",
             )

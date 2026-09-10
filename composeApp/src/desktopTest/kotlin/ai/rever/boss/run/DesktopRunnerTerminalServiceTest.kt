@@ -12,6 +12,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -37,6 +38,8 @@ import kotlin.test.assertTrue
  */
 class DesktopRunnerTerminalServiceTest {
     private val windowId = "cancel-test-window"
+    private val windowA = "cancel-test-window-a"
+    private val windowB = "cancel-test-window-b"
     private val config =
         RunConfiguration(
             id = "cancel-test-config",
@@ -55,6 +58,8 @@ class DesktopRunnerTerminalServiceTest {
         runBlocking {
             RunnerTerminalEventBus.ipcBridge = null
             RunnerTerminalService.cleanupWindow(windowId)
+            RunnerTerminalService.cleanupWindow(windowA)
+            RunnerTerminalService.cleanupWindow(windowB)
             RunnerSettingsManager.updateSettings(originalSettings)
         }
 
@@ -96,6 +101,59 @@ class DesktopRunnerTerminalServiceTest {
             assertNull(
                 RunnerTerminalService.configToTerminal.value[config.id],
                 "a rerun cancelled during teardown must not leave the config pointing at a never-opened terminal",
+            )
+        }
+
+    /**
+     * BossConsole#486 review, round 4: the rollback above cleared only the cancelling window from
+     * `_configToWindows`, leaving a second window that shared the same config's one terminal
+     * reporting `isConfigRunningInWindow == true` against a `_configToTerminal` entry the rollback
+     * had just deleted - a permanently lit Stop button `stopRunner` can never find a terminal for.
+     *
+     * `openRunnerTerminal` reuses an existing `_configToTerminal[config.id]` entry rather than
+     * minting a second one, so calling it for [windowA] then [windowB] is what puts both windows
+     * on the *same* terminal - exactly how a config already running in one window looks to a
+     * second window that also has it running.
+     */
+    @Test
+    fun `cancelling a rerun in one window also stops reporting it running in a second window sharing the terminal`() =
+        runBlocking {
+            RunnerSettingsManager.setTerminalTarget(RunnerTerminalTarget.MAIN_PANEL)
+
+            RunnerTerminalService.openRunnerTerminal(config, windowA) {}
+            RunnerTerminalService.openRunnerTerminal(config, windowB) {}
+            assertNotNull(
+                RunnerTerminalService.configToTerminal.value[config.id],
+                "sanity: the config should be tracked as running before the rerun under test",
+            )
+
+            lateinit var rerunJob: Job
+            RunnerTerminalEventBus.ipcBridge =
+                object : IpcEventBridge {
+                    override suspend fun forward(
+                        eventType: String,
+                        payload: Any,
+                        sourceWindowId: String,
+                    ) {
+                        if (eventType == "RunnerTerminalCloseEvent") rerunJob.cancel()
+                    }
+                }
+
+            rerunJob = launch { RunnerTerminalService.rerunRunner(config, windowB) {} }
+            rerunJob.join()
+
+            assertTrue(rerunJob.isCancelled)
+            assertNull(
+                RunnerTerminalService.configToTerminal.value[config.id],
+                "the shared terminal was torn down by the cancelled rerun and never replaced",
+            )
+            assertFalse(
+                RunnerTerminalService.isConfigRunningInWindow(windowA, config.id),
+                "window A must not still claim the config is running once the terminal it shared is gone",
+            )
+            assertFalse(
+                RunnerTerminalService.isConfigRunningInWindow(windowB, config.id),
+                "window B (the one that cancelled) must not claim the config is running either",
             )
         }
 }

@@ -88,8 +88,14 @@ actual object RunnerTerminalService {
     ) {
         val remaining = terminalToConfigs[terminalId] ?: return
         remaining.remove(configId)
+        // Plain remove(terminalId), not a compare-and-swap against `remaining` (BossConsole#486
+        // review): every one of this function's nine call sites already holds stateLock, so there
+        // is no concurrent addConfigToTerminal this could race with between the isEmpty() check
+        // and the remove - a two-arg remove(terminalId, remaining) here would compare the map's
+        // current value against the very reference just read from it, which is always true and
+        // protects nothing.
         if (remaining.isEmpty()) {
-            terminalToConfigs.remove(terminalId, remaining)
+            terminalToConfigs.remove(terminalId)
         }
     }
 
@@ -400,6 +406,16 @@ actual object RunnerTerminalService {
      * neither exists - the state swapped at the top of [rerunRunner] must not keep pointing at a
      * `terminalId` nothing will create. [kotlinx.coroutines.ensureActive] rethrows the
      * cancellation after that rollback, rather than this function returning `false` for it.
+     *
+     * The rollback clears **every** window tracking this config, not only [windowId] - deliberately
+     * unlike [stopRunner], which removes just the calling window and leaves the others alone. The
+     * two differ because they start from different truths: [stopRunner] closes one window's own
+     * terminal and the others' remains live, so clearing only that window is correct. Here there is
+     * only ever one terminal per config, `_configToTerminal[config.id]`, and the interrupt/close
+     * above already tore it down for every window sharing it - "ours" or not, it no longer exists.
+     * Removing only [windowId] left a second window's `isConfigRunningInWindow` reporting `true`
+     * against a `_configToTerminal` entry that had just been deleted, so its Stop button stayed lit
+     * for a terminal `stopRunner` could never find (BossConsole#486 review, round 4).
      */
     private suspend fun rerunStillValid(
         config: RunConfiguration,
@@ -417,7 +433,7 @@ actual object RunnerTerminalService {
                     _configToTerminal.update { it - config.id }
                     removeConfigFromTerminal(terminalId, config.id)
                     _runningConfigs.update { it - config.id }
-                    removeWindowFromConfig(config.id, windowId)
+                    removeAllWindowsFromConfig(config.id)
                 }
                 ownsTerminal
             }
