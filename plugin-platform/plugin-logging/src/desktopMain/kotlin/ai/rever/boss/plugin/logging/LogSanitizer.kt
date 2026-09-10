@@ -337,11 +337,13 @@ object LogSanitizer {
      * by the time [filePathPattern] runs — the fix is in what reaches that
      * pass, not in loosening its own boundary (which exists for the
      * `host:port` case this pass does not touch: no `?`/`&`/`#` precedes it).
-     * The value is terminated at the next `&`, `#`, closing bracket/paren/
-     * quote, or whitespace — deliberately not at `:`, which is exactly the
-     * character this pass exists to protect.
+     * Only parameter/fragment separators and whitespace terminate the value.
+     * Punctuation such as `)` and an apostrophe is legal inside a URI value;
+     * treating it as a log wrapper can leave a later colon and secret suffix
+     * exposed. Conservatively consume adjacent wrapper punctuation too, as
+     * the following path pass already does for colon-free URLs.
      */
-    private val sensitiveQueryParamPattern = Regex("""([?&#])([A-Za-z][A-Za-z0-9_.-]*)=([^&#\s\])"'>]+)""")
+    private val sensitiveQueryParamPattern = Regex("""([?&#])([A-Za-z][A-Za-z0-9_.-]*)=([^&#\s]+)""")
 
     /** Inserts a word boundary into camelCase names, so `accessToken` splits like `access_token`. */
     private val camelCaseBoundary = Regex("""(?<=[a-z0-9])(?=[A-Z])""")
