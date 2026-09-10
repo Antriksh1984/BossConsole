@@ -67,10 +67,10 @@ internal fun openRunnerInMainPanel(
             ?: splitViewState.getAllPanels().firstOrNull()?.tabsComponent
 
     if (activeComponent != null) {
-        val tabIndex = activeComponent.addTab(terminalTab)
-        if (tabIndex >= 0 && RunnerSettingsManager.currentSettings.value.focusOnRun) {
-            activeComponent.selectTab(tabIndex)
-        }
+        // A selectTab call right after addTab used to be a no-op: TabsNavigation.addTab always
+        // made the new tab active regardless, so turning focusOnRun off never actually left the
+        // previously active tab in place. activate= is what addTab itself now honors.
+        activeComponent.addTab(terminalTab, activate = RunnerSettingsManager.currentSettings.value.focusOnRun)
     }
 }
 

@@ -216,10 +216,19 @@ data class RunnerSettings(
     /**
      * Delay in milliseconds between sending Ctrl+C and the new command during re-run.
      * This gives the shell time to handle the interrupt and show its prompt.
-     * Default: 1000ms. Range: 0-2000ms
+     * Default: 1000ms. Range: [MIN_RERUN_DELAY_MS]-[MAX_RERUN_DELAY_MS]
      */
     val rerunDelayMs: Long = 1000,
 )
+
+/**
+ * The valid range for [RunnerSettings.rerunDelayMs] - shared by the write-side clamp
+ * (`DesktopRunnerSettingsManager.setRerunDelayMs`) and the read-side clamp in `rerunRunner`
+ * (a hand-edited settings file is read straight through to `delay()` otherwise), so the two
+ * cannot state a different range from one another.
+ */
+const val MIN_RERUN_DELAY_MS = 0L
+const val MAX_RERUN_DELAY_MS = 2000L
 
 // ============================================
 // Run Event Types
