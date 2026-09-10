@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginStoreTrust
@@ -1673,6 +1674,9 @@ object PluginStoreSetup {
                             highestExistingVersion = existingVersion
                         }
                         if (!PluginVersionComparator.isNewerVersion(bundledVersion, existingVersion)) {
+                            // Older hosts copied these bytes without a provenance marker. Bind
+                            // only an exact bundle match; store updates and side-loads stay untrusted.
+                            val bundledTrust = PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Found existing JAR with same/newer version - skipping",
@@ -1681,10 +1685,12 @@ object PluginStoreSetup {
                                     "bundledVersion" to bundledVersion,
                                     "existingVersion" to existingVersion,
                                     "existingJar" to existingJar.name,
+                                    "bundledTrust" to bundledTrust,
                                 ),
                             )
                             shouldSkip = true
-                            break
+                            // Keep checking: reconciliation can keep a different same-version
+                            // copy, so every byte-identical candidate needs its own marker.
                         }
                     }
                 }
@@ -1701,6 +1707,7 @@ object PluginStoreSetup {
                         if (existingManifest != null &&
                             !PluginVersionComparator.isNewerVersion(bundledVersion, existingManifest.version)
                         ) {
+                            val bundledTrust = PluginBundledTrust.bindToBundle(existingJar.absolutePath, jarFile)
                             logger.info(
                                 LogCategory.SYSTEM,
                                 "Bundled plugin already installed with same/newer version - skipping",
@@ -1708,6 +1715,7 @@ object PluginStoreSetup {
                                     "pluginId" to pluginId,
                                     "bundledVersion" to bundledVersion,
                                     "installedVersion" to existingManifest.version,
+                                    "bundledTrust" to bundledTrust,
                                 ),
                             )
                             continue
@@ -1756,6 +1764,7 @@ object PluginStoreSetup {
                     // exists to prevent.
                     if (oldJarDeleted) {
                         runCatching { PluginSignatureSidecar.delete(oldJar.absolutePath) }
+                        runCatching { PluginBundledTrust.delete(oldJar.absolutePath) }
                     }
                 }
 
@@ -1777,10 +1786,24 @@ object PluginStoreSetup {
                 // left a sidecar behind. Clearing afterwards would leave a crash
                 // window pairing the old signature with new bytes, which is a hard
                 // load failure, unlike no sidecar at all. `copyTo` is not atomic
-                // either, so the window is real.
+                // either, so the window is real. The bundled-trust marker gets the
+                // same treatment for the same reason — a stale marker matching new
+                // bytes by coincidence is not a realistic risk, but nothing here
+                // depends on that being true.
                 runCatching { PluginSignatureSidecar.delete(destFile.absolutePath) }
+                runCatching { PluginBundledTrust.delete(destFile.absolutePath) }
 
                 jarFile.copyTo(destFile, overwrite = true)
+
+                // Anchor trust to the bundled source, not whatever happens to occupy the
+                // writable destination after copying. A later replacement invalidates the marker.
+                if (!PluginBundledTrust.bindToBundle(destFile.absolutePath, jarFile)) {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not bind copied plugin to bundled bytes",
+                        mapOf("pluginId" to pluginId, "jarPath" to destFile.absolutePath),
+                    )
+                }
 
                 logger.info(
                     LogCategory.SYSTEM,
