@@ -28,6 +28,7 @@ import ai.rever.boss.services.FileHandlerService
 import ai.rever.boss.services.TerminalHandlerService
 import ai.rever.boss.services.URLHandlerService
 import ai.rever.boss.services.WorkspaceHandlerService
+import ai.rever.boss.settings.MicrokernelModeConfirmation
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.updater.UpdateHandle
 import ai.rever.boss.utils.logging.BossLogger
@@ -190,9 +191,7 @@ internal class BossAppState(
     // on and is waiting for the operator to confirm it (BossConsole#472). The Settings entry
     // point shows its own copy of this dialog locally instead, since it already has a
     // composable scope to hold the state in.
-    val microkernelModeConfirmation =
-        ai.rever.boss.settings
-            .MicrokernelModeConfirmation()
+    val microkernelModeConfirmation = MicrokernelModeConfirmation()
 
     // Snapshot of the in-progress MRU tab cycle, drives the Ctrl+Tab switcher overlay
     // (null in positional mode and whenever no cycle is active).

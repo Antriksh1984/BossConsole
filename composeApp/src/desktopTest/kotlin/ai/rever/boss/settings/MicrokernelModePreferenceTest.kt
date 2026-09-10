@@ -315,7 +315,7 @@ class MicrokernelModePreferenceTest {
     }
 
     @Test
-    fun `a failed refresh preserves the saved value and keeps the error visible`() =
+    fun `a failed refresh preserves the saved value and reports it as a read failure, not a save failure`() =
         runTest {
             val file = tempEnvFile()
             MicrokernelModePreference.setEnabled(true, file)
@@ -325,6 +325,71 @@ class MicrokernelModePreferenceTest {
             MicrokernelModePreference.refresh(file)
             assertEquals(true, MicrokernelModePreference.saveState.value.enabled)
             assertEquals(true, MicrokernelModePreference.saveState.value.startupEnabled)
-            assertTrue(MicrokernelModePreference.saveState.value.saveFailed)
+            // Nothing was written here - refresh() only reads - so this must not be reported
+            // through the same flag a failed write uses (BossConsole#481 review): the two surfaces
+            // this drives say "check that BOSS can write" / "save failed - retry" for saveFailed,
+            // which is actively wrong advice for a fault that never attempted a write.
+            assertTrue(MicrokernelModePreference.saveState.value.readFailed)
+            assertFalse(MicrokernelModePreference.saveState.value.saveFailed)
+            assertEquals(
+                "Microkernel Mode (unavailable)",
+                microkernelModeMenuLabel(MicrokernelModePreference.saveState.value),
+            )
         }
+
+    @Test
+    fun `a read failure on the very first refresh is distinguishable from a save failure`() =
+        runTest {
+            // No prior successful refresh here - enabled and startupEnabled both stay null, which
+            // is exactly the case the review flagged: both controls end up disabled, so a
+            // "save failed - retry" label would invite a retry neither surface can perform.
+            val file = tempEnvFile().also { it.mkdir() }
+            MicrokernelModePreference.refresh(file)
+            assertNull(MicrokernelModePreference.saveState.value.enabled)
+            assertNull(MicrokernelModePreference.saveState.value.startupEnabled)
+            assertTrue(MicrokernelModePreference.saveState.value.readFailed)
+            assertEquals(
+                "Microkernel Mode (unavailable)",
+                microkernelModeMenuLabel(MicrokernelModePreference.saveState.value),
+            )
+        }
+
+    @Test
+    fun `export-prefixed assignments are read and can be toggled off in place`() =
+        runTest {
+            val file = tempEnvFile()
+            file.writeText("export BOSS_MODE=KERNEL\n")
+            assertTrue(MicrokernelModePreference.isEnabled(file), "export BOSS_MODE=KERNEL should read as enabled")
+
+            assertTrue(MicrokernelModePreference.setEnabled(false, file).isSuccess)
+            assertFalse(MicrokernelModePreference.isEnabled(file))
+            // Replaced in place rather than appended - the pre-fix behavior could not find the
+            // export-prefixed assignment at all and appended a second, unrelated line instead,
+            // leaving the original export line (still active) untouched underneath it.
+            assertEquals(listOf("# BOSS_MODE=KERNEL"), file.readLines())
+        }
+
+    @Test
+    fun `a read-only target is refused before any temp file is created`() {
+        val file = tempEnvFile()
+        file.writeText("BOSS_MODE=KERNEL\n")
+        if (!file.setWritable(false)) return // best-effort: some CI filesystems ignore this
+        try {
+            // Confirmed empirically to differ by platform (BossConsole#481 review): POSIX
+            // rename() only cares about directory permissions, so a read-only target in a
+            // writable directory is technically replaceable there - but Windows' ATOMIC_MOVE
+            // (MoveFileEx/MOVEFILE_REPLACE_EXISTING) honors the target's own read-only attribute
+            // and fails to replace it regardless of directory permissions, which this test caught
+            // directly (AccessDeniedException) before writeModeFile gained its own precondition
+            // for it. Keeping the target check - not replacing it with a parent-only check -
+            // means both platforms fail the same clear, early way instead of Windows failing deep
+            // inside Files.move with a less specific exception.
+            assertFailsWith<java.io.IOException> {
+                writeModeFile(file, "BOSS_MODE=KERNEL\nEXTRA=1\n")
+            }
+            assertEquals(listOf("env_vars"), file.parentFile.list()!!.toList())
+        } finally {
+            file.setWritable(true)
+        }
+    }
 }

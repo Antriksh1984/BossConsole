@@ -33,6 +33,7 @@ fun AdvancedSettings() {
     val kernelMode = saveState.enabled ?: false
     val needsRestart = saveState.needsRestart
     val saveError = saveState.saveFailed
+    val readError = saveState.readFailed
     val confirmation = remember { MicrokernelModeConfirmation() }
 
     LaunchedEffect(Unit) { MicrokernelModePreference.refresh() }
@@ -73,7 +74,7 @@ fun AdvancedSettings() {
                 description = "Run plugins in isolated processes with gRPC IPC and AI self-healing",
             )
 
-            if (saveError) {
+            if (saveError || readError) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -82,7 +83,18 @@ fun AdvancedSettings() {
                     elevation = 0.dp,
                 ) {
                     Text(
-                        text = "Could not save Microkernel Mode. Check that BOSS can write to its config directory.",
+                        // Distinct messages, not one reworded flag (BossConsole#481 review): a
+                        // read failure never attempted a write, so "check that BOSS can write" is
+                        // actively wrong advice for it, and on a first-ever refresh failing this
+                        // way the toggle above is also disabled - there is nothing to retry from
+                        // this surface until some other window's refresh happens to succeed.
+                        text =
+                            if (readError) {
+                                "Could not read the Microkernel Mode preference. It may become available " +
+                                    "once BOSS can read its config directory."
+                            } else {
+                                "Could not save Microkernel Mode. Check that BOSS can write to its config directory."
+                            },
                         fontSize = 11.sp,
                         color = BossTheme.colors.alert,
                         fontWeight = FontWeight.Medium,
