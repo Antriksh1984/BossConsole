@@ -68,6 +68,8 @@ import ai.rever.boss.search.SearchSources
 import ai.rever.boss.search.ToolSearchRecord
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
+import ai.rever.boss.settings.MICROKERNEL_MODE_CONFIRMATION_MESSAGE
+import ai.rever.boss.settings.MicrokernelModePreference
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
 import ai.rever.boss.utils.extractFileName
 import ai.rever.boss.utils.logging.LogCategory
@@ -813,6 +815,23 @@ internal fun BossAppDialogs(state: BossAppState) {
             },
             onDeny = { reason ->
                 McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason)
+            },
+        )
+    }
+
+    // Application-menu request to enable experimental Microkernel Mode (BossConsole#472) - the
+    // Settings entry point shows its own copy of this dialog locally, since that composable
+    // already owns a scope to hold the pending/error state in.
+    if (state.pendingMicrokernelModeConfirmation) {
+        ConfirmationDialog(
+            title = "Enable experimental Microkernel Mode?",
+            message = MICROKERNEL_MODE_CONFIRMATION_MESSAGE,
+            confirmText = "Enable experimental mode",
+            onDismiss = { state.pendingMicrokernelModeConfirmation = false },
+            onConfirm = {
+                coroutineScope.launch {
+                    MicrokernelModePreference.setEnabled(true)
+                }
             },
         )
     }

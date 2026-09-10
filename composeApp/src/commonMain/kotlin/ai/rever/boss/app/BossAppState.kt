@@ -186,6 +186,12 @@ internal class BossAppState(
     // for operator approval under an ASK policy.
     var pendingMcpApproval by mutableStateOf<McpApprovalRequest?>(null)
 
+    // The application-menu "Microkernel Mode" checkbox requested turning the experimental mode
+    // on and is waiting for the operator to confirm it (BossConsole#472). The Settings entry
+    // point shows its own copy of this dialog locally instead, since it already has a
+    // composable scope to hold the state in.
+    var pendingMicrokernelModeConfirmation by mutableStateOf(false)
+
     // Snapshot of the in-progress MRU tab cycle, drives the Ctrl+Tab switcher overlay
     // (null in positional mode and whenever no cycle is active).
     var tabCycleOverlay by mutableStateOf<TabCycleOverlayData?>(null)

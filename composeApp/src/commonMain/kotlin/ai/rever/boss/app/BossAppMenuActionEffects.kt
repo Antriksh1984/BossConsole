@@ -315,6 +315,15 @@ internal fun BossAppMenuActionEffects(
             }.launchIn(this)
     }
 
+    LaunchedEffect(windowId) {
+        MenuActionsHandler.confirmMicrokernelModeEvents
+            .onEach { eventWindowId ->
+                if (eventWindowId == windowId) {
+                    state.pendingMicrokernelModeConfirmation = true
+                }
+            }.launchIn(this)
+    }
+
     // Handle View menu events
     LaunchedEffect(windowId) {
         MenuActionsHandler.toggleFocusModeEvents
