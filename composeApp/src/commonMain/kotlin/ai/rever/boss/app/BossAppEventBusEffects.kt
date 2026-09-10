@@ -18,9 +18,8 @@ import ai.rever.boss.components.plugin.DependentRestartEventBus
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
 import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
+import ai.rever.boss.components.plugin.claimMissingDependencyForWindow
 import ai.rever.boss.components.plugin.resolveRegisteredPanelId
-import ai.rever.boss.components.plugin.shouldClaimMissingDependencyPrompt
-import ai.rever.boss.components.plugin.shouldShowMissingDependency
 import ai.rever.boss.components.window_panel.SplitViewState
 import ai.rever.boss.components.workspaces.WorkspaceSerializer
 import ai.rever.boss.components.workspaces.applyWorkspace
@@ -233,69 +232,24 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
     LaunchedEffect(windowId) {
         PluginDependencyEventBus.missingDependencies
             .collect { prompt ->
-                // Every open window sees the same broadcast. The prompt may name a specific
-                // reporting window (best-effort - see MissingDependencyPrompt.windowId); if it
-                // does, is still open, and it is not us, this window is the wrong audience -
-                // leave the prompt exactly where it is (still pending on the bus) rather than
-                // claiming it, so the right window's own collector - or, if that window closes
-                // first, the bus's periodic re-scan - picks it up instead.
-                val shouldClaim =
-                    shouldClaimMissingDependencyPrompt(
+                val claimed =
+                    PluginDependencyEventBus.claimMissingDependencyForWindow(
                         prompt = prompt,
                         collectorWindowId = windowId,
                         targetWindowOpen = prompt.windowId?.let { WindowFocusManager.isWindowOpen(it) } == true,
-                    )
-                if (!shouldClaim) {
-                    return@collect
-                }
-                // Re-check rather than trusting the report: two dependents of one missing
-                // plugin each raise a prompt, so installing for the first satisfies the
-                // second, whose dialog would otherwise claim something untrue and reinstall
-                // what is already loaded. Off the UI thread because the check stats the jar.
-                //
-                // Deliberately BEFORE claim(), not after: claiming here and then suspending on
-                // this IO stat left a real cancellation hole (window closing, or this effect
-                // restarting, during the stat) that permanently lost an already-claimed prompt -
-                // it was off the bus with nowhere else recorded. Checking first means the only
-                // thing lost to a cancellation here is the redundant work, since the prompt is
-                // still sitting in `pending` for any other window's collector (or the ticker) to
-                // pick up. The cost is that two windows can both run this same stat concurrently
-                // in the rare case they are both deciding on one prompt at once - a duplicated
-                // read, not a lost one.
-                val present =
-                    withContext(Dispatchers.IO) {
-                        prompt.installer.isInstalled(prompt.missing.missingPluginId)
-                    }
-                // The rule itself lives in `shouldShowMissingDependency`, so it can be tested
-                // against rather than restated here. Notably it exempts a prompt a person asked
-                // for by pressing something: without that, dismissing the offer once left the
-                // control silent for the rest of the session.
-                val show =
-                    shouldShowMissingDependency(
-                        prompt = prompt,
-                        present = present,
-                        declined = PluginDependencyEventBus.wasDeclined(prompt.missing),
-                    )
-                if (!show) {
-                    return@collect
-                }
-                // Take ownership immediately before acting on it, not before: another window's
-                // collector may have been woken by the same broadcast and reached this same
-                // decision concurrently, and only one of us may proceed. A losing claim means
-                // someone else already has it - which the check above being redundant work for
-                // this window is the entire cost of, now that it runs before rather than after.
-                // Nothing between here and the state assignment below suspends, so this is the
-                // only remaining strand a cancellation could land on (the documented, accepted
-                // dialog-open gap noted just below).
-                if (!PluginDependencyEventBus.claim(prompt)) {
-                    return@collect
-                }
+                        isPresent = {
+                            withContext(Dispatchers.IO) {
+                                prompt.installer.isInstalled(prompt.missing.missingPluginId)
+                            }
+                        },
+                    ) ?: return@collect
+                // Publish immediately after claiming, without another suspension.
                 // Reset here rather than relying on the previous dialog's exit path having
                 // cleared them: the three fields are reused for every prompt, and ordering
                 // between that clear and this assignment should not be load-bearing.
                 state.installingMissingDependency = false
                 state.missingDependencyError = null
-                state.pendingMissingPluginDependency = prompt
+                state.pendingMissingPluginDependency = claimed
                 // Back-pressure instead of a queue: this collect loop does not move on to the
                 // next broadcast emission until this one is answered, so a second missing
                 // dependency in this same window is asked about after the first rather than

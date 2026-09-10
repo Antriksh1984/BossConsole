@@ -454,9 +454,8 @@ interface MissingDependencyInstaller {
  * **With more than one window open**, [windowId] is a best-effort claim on which window should
  * show this: [shouldClaimMissingDependencyPrompt] decides whether the window that collects it
  * off the bus is the right one to show it, or should leave it for [windowId]'s own window
- * instead - see that function's KDoc for what "leave it" means with a channel rather than a
- * claim registry. A null [windowId] (no resolvable reporting window, or a call site that never
- * set one) behaves exactly as before this field existed: whichever window collects it shows it.
+ * instead. The bus retains each prompt until an eligible collector atomically claims it.
+ * A null [windowId] is unscoped: whichever eligible window claims it shows it.
  */
 data class MissingDependencyPrompt(
     val missing: MissingPluginDependency,
@@ -504,7 +503,7 @@ data class MissingDependencyPrompt(
  * gone missing while the plugin sat disabled (#180).
  *
  * A class with a singleton subclass rather than a bare object, so a test can hold its own bus.
- * The shared buffer otherwise carries prompts between tests, which is the same coupling two
+ * The shared pending map otherwise carries prompts between tests, which is the same coupling two
  * windows would have.
  */
 open class PluginDependencyBus {
@@ -606,7 +605,7 @@ open class PluginDependencyBus {
      * [shouldClaimMissingDependencyPrompt], whether a given prompt is its to show - then calls
      * [claim] before acting on it. Re-scanning on a bounded interval as well as on every
      * [changed] signal is the fallback for the one case no signal fires for: the prompt's
-     * preferred window closing with nobody reporting anything new. A single bus-owned ticker,
+     * preferred window closing with nobody reporting anything new. A ticker per collecting window,
      * not one wait-and-retry loop per rejected prompt per window (the shape the prior
      * `reofferMissingDependencyPrompt` had, and exactly what the review's "unbounded routing
      * hops" finding was about) - this bounds total wakeups to one merged stream per collecting

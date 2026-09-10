@@ -147,12 +147,10 @@ an update-shaped verb (or an intent parameter) on the api rather than a change t
 - **Optional dependencies are reported, flagged, not dropped.** An optional dependency is how a
   plugin says "this feature needs that plugin". Dropping them would leave this reporting
   nothing for the case it was built for.
-- **The event bus is a `Channel`, not a `SharedFlow`.** A broadcast would put the same dialog in
-  front of every open window and let each of them start the same install. The collector applies
-  back-pressure (`snapshotFlow { … }.first { it == null }`) so a second missing dependency is
-  asked about after the first rather than replacing it, and re-checks `isInstalled` before
-  showing - two dependents of one missing plugin each raise a prompt, so installing for the
-  first satisfies the second.
+- **The dependency bus retains pending prompts until atomically claimed.** Each eligible window
+  checks presence before claiming; cancellation during that check leaves the prompt pending.
+  Installed or declined prompts are also claimed and retired, so a later explicit retry can
+  reserve the key. A window waits for its current dialog to close before handling another prompt.
 - **Installing is the host's to do.** `PluginRepository.getPlugin(id)` plus `downloadPlugin`
   resolve an id to a jar, which no plugin can do - a plugin holding a null API can only send
   the user to the Toolbox to search by name.
@@ -253,8 +251,10 @@ Deliberately out of scope, so nobody assumes more than exists:
   whether to `claim()` it. A non-target window that isn't the right audience simply leaves the
   prompt where it is; there is no reoffer, no retry loop, and no per-rejection wait. When the
   preferred window has closed, any other window may claim the prompt instead - and its installer
-  re-resolves to any still-live `DynamicPluginManager` at use time (`MissingDependencyReporter.installerFor`),
-  not the one that reported it, since that one's manager is disposed along with the window.
+  preserves its reporting manager while it is live and re-resolves to another live manager
+  after disposal (`MissingDependencyReporter.installerFor`). With none left, loading fails
+  explicitly. Each collecting window owns its periodic rescan, including while the queue is empty.
+  Closing a window after its dialog appears can still abandon that claimed prompt.
 - **The bus filters at report time, not only in the collector.** A prompt already declined this
   session is dropped before it is ever admitted; a duplicate report for a key still pending keeps
   the first reporter's prompt (and its `windowId`) rather than being replaced by the second. There
@@ -1071,7 +1071,7 @@ nothing" was.
    plugins have not registered yet, and prompting there would be a false alarm on
    every launch, the same reason `WorkspaceApplier.awaitTabTypes` exists;
 3. only then raises a `MissingHandlerPluginPrompt` on `MissingHandlerPluginEventBus`,
-   whose delivery copies `PluginDependencyBus` deliberately: a `Channel` so exactly
+   which keeps unscoped delivery through a `Channel` so exactly
    one window asks, buffered so reporting never suspends the open, `trySend` so an
    overflow is refused and logged rather than silently dropped;
 4. waits again, up to five minutes, for the plugin to register. **The dialog has no

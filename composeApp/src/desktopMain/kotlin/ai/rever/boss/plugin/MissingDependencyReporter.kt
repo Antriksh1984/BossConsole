@@ -150,24 +150,17 @@ class MissingDependencyReporter(
          * "installed", which AGENTS.md records as having broken the dependency prompt once
          * already when two halves disagreed.
          *
-         * [manager] is only the fallback, not what actually runs `isInstalled`/`install` -
-         * [activeManager] re-resolves via [DynamicPluginManager.anyActiveManager] on every call
-         * instead. A prompt reported by [manager]'s window can be claimed and answered by a
-         * *different* window once that window has closed (`shouldClaimMissingDependencyPrompt`'s
-         * closed-target fallback, BossConsole#465's own review) - `disposeWindow()` cancels
-         * [manager] and clears its plugin state, so capturing it once would mean `isInstalled`
-         * permanently answers for a manager that has already uninstalled everything and
-         * `install` loads into one that can never run anything again. This is the exact #188
-         * fix `anyActiveManager` was already written for (see its own KDoc), applied to the
-         * dependency prompt's installer as well as the home screen's.
+         * Keep the reporting manager while it is live. After its window closes, resolve another
+         * live manager at use time. With none left, loading fails explicitly instead of reviving
+         * the disposed manager. Presence and load both use this policy.
          */
         fun installerFor(manager: DynamicPluginManager): MissingDependencyInstaller {
-            fun activeManager(): DynamicPluginManager = DynamicPluginManager.anyActiveManager() ?: manager
+            fun activeManager(): DynamicPluginManager? = DynamicPluginManager.activeManagerOrFallback(manager)
 
             val installedNow: (String) -> Boolean = { pluginId ->
                 pluginId in
                     PluginDependencyResolution.installedAndOnDisk(
-                        states = activeManager().pluginStates.value,
+                        states = activeManager()?.pluginStates?.value.orEmpty(),
                         exists = { File(it).isFile },
                         isIncompatible = { PluginCrashRegistry.isIncompatible(it) },
                     )
@@ -178,7 +171,12 @@ class MissingDependencyReporter(
                 hooks =
                     InstallerHooks(
                         installedNow = installedNow,
-                        load = { jarPath -> activeManager().installPlugin(jarPath) },
+                        load = { jarPath ->
+                            activeManager()?.installPlugin(jarPath)
+                                ?: Result.failure<Unit>(
+                                    IllegalStateException("No active window is available to install the plugin."),
+                                )
+                        },
                     ),
             )
         }
