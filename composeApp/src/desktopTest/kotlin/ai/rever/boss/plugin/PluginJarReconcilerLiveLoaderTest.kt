@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginClassLoader
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import java.io.File
@@ -121,6 +122,7 @@ class PluginJarReconcilerLiveLoaderTest {
         val older = manifestJar(dir, "multiple-1.0.0.jar", id, "1.0.0")
         manifestJar(dir, "multiple-2.0.0.jar", id, "2.0.0")
         val signature = File(PluginSignatureSidecar.pathFor(older.absolutePath)).apply { writeText("test-sidecar") }
+        PluginBundledTrust.bindToBundle(older.absolutePath, older)
         val first = openLoaderOver(older)
         val second = openLoaderOver(older)
         first.close()
@@ -129,11 +131,13 @@ class PluginJarReconcilerLiveLoaderTest {
         assertTrue(older.name in retained.deferred)
         assertTrue(older.exists())
         assertTrue(signature.exists())
+        assertTrue(PluginBundledTrust.isTrusted(older.absolutePath))
         second.close()
         val removed = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = setOf(id))
         assertTrue(older.name in removed.deleted)
         assertFalse(older.exists())
         assertFalse(signature.exists())
+        assertFalse(File(PluginBundledTrust.pathFor(older.absolutePath)).exists())
     }
 
     @Test

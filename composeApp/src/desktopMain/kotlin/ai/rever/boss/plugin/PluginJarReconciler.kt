@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.components.plugin.MicrokernelRuntime
 import ai.rever.boss.plugin.api.PluginManifest
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginClassLoader
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
@@ -151,6 +152,8 @@ object PluginJarReconciler {
             // A `.sig` must never outlive the JAR it describes: left behind it is an orphan
             // now, and a hard load failure later if a JAR of the same name lands on the path.
             runCatching { PluginSignatureSidecar.delete(loser.file.absolutePath) }
+            // Retain bundled provenance while deferred; remove it once its JAR is actually deleted.
+            runCatching { PluginBundledTrust.delete(loser.file.absolutePath) }
         }
         logger.info(
             LogCategory.SYSTEM,
