@@ -12,13 +12,16 @@ class ExecutableDownloadConsentTest {
     @Test
     fun `renaming a text file to an executable still asks for consent`() {
         var shownName: String? = null
+        var prompts = 0
         assertFalse(
             executableDownloadAllowed(true, "report.txt", "report.EXE") {
                 shownName = it
+                prompts++
                 false
             },
         )
         assertEquals("report.EXE", shownName)
+        assertEquals(1, prompts)
     }
 
     @Test

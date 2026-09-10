@@ -1,6 +1,5 @@
 package ai.rever.boss.platform
 
-import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -9,9 +8,10 @@ import kotlin.test.assertTrue
 class ExecutableDownloadDialogTest {
     @Test
     fun `only explicit acceptance permits the download`() {
-        assertTrue(confirmExecutableDownloadOnEdt { JOptionPane.OK_OPTION })
-        assertFalse(confirmExecutableDownloadOnEdt { JOptionPane.CANCEL_OPTION })
-        assertFalse(confirmExecutableDownloadOnEdt { JOptionPane.CLOSED_OPTION })
+        assertTrue(confirmExecutableDownloadOnEdt { 0 })
+        assertFalse(confirmExecutableDownloadOnEdt { 1 })
+        assertFalse(confirmExecutableDownloadOnEdt { -1 })
+        assertFalse(confirmExecutableDownloadOnEdt { 2 })
     }
 
     @Test
@@ -20,7 +20,7 @@ class ExecutableDownloadDialogTest {
         assertTrue(
             confirmExecutableDownloadOnEdt {
                 assertTrue(SwingUtilities.isEventDispatchThread())
-                JOptionPane.OK_OPTION
+                0
             },
         )
     }
@@ -28,7 +28,7 @@ class ExecutableDownloadDialogTest {
     @Test
     fun `an EDT caller can answer without invoking and waiting on itself`() {
         SwingUtilities.invokeAndWait {
-            assertTrue(confirmExecutableDownloadOnEdt { JOptionPane.OK_OPTION })
+            assertTrue(confirmExecutableDownloadOnEdt { 0 })
             assertFalse(confirmExecutableDownloadOnEdt { error("Dialog unavailable") })
         }
     }
