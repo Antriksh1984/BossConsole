@@ -1089,6 +1089,8 @@ kotlin {
                 "**/plugin/PluginStateDeltaTest.kt",
                 // Its process registry and production ID helper belong to the excluded OOP runtime.
                 "**/plugin/PluginProcessIdTest.kt",
+                // The runner cancellation test uses boss-ipc's IpcEventBridge.
+                "**/run/DesktopRunnerTerminalServiceTest.kt",
             )
         }
     }

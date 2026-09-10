@@ -10,8 +10,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * BossConsole#486 review, round 3: `rerunRunner`'s `withContext(NonCancellable)` guarantees the
@@ -63,6 +65,7 @@ class DesktopRunnerTerminalServiceTest {
             // rerunRunner skips it entirely under SIDEBAR_PANEL (usesSidebar).
             RunnerSettingsManager.setTerminalTarget(RunnerTerminalTarget.MAIN_PANEL)
 
+            val events = mutableListOf<String>()
             lateinit var rerunJob: Job
             RunnerTerminalEventBus.ipcBridge =
                 object : IpcEventBridge {
@@ -71,6 +74,7 @@ class DesktopRunnerTerminalServiceTest {
                         payload: Any,
                         sourceWindowId: String,
                     ) {
+                        events += eventType
                         if (eventType == "RunnerTerminalCloseEvent") rerunJob.cancel()
                     }
                 }
@@ -81,6 +85,9 @@ class DesktopRunnerTerminalServiceTest {
                     RunnerTerminalService.rerunRunner(config, windowId) {}
                 }
             rerunJob.join()
+
+            assertTrue(rerunJob.isCancelled)
+            assertEquals(listOf("RunnerTerminalOpenEvent", "RunnerTerminalCloseEvent"), events)
 
             assertFalse(
                 RunnerTerminalService.isConfigRunning(config.id),

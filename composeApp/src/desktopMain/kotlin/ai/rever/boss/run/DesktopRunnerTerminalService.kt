@@ -275,11 +275,11 @@ actual object RunnerTerminalService {
      * For sidebar panel: Ctrl+C is handled by openInSidebarTerminal via the isRerun flag.
      *
      * The returned id is not always a terminal that exists: when the re-run was superseded by a
-     * concurrent stop/re-run, or when the caller itself was cancelled during teardown, this
+     * concurrent stop/re-run, this
      * returns the id it *would* have opened without calling [onTerminalCreated] or emitting
      * anything - both current callers ([ai.rever.boss.components.bars.horizontal.BossTopRunBar])
      * ignore the return value, so this has been silent so far, but a future caller that trusts it
-     * should not.
+     * should not. Cancellation during teardown instead rolls back owned state and throws.
      *
      * @param windowId The window ID that initiated the run (Issue #498)
      */
@@ -406,23 +406,22 @@ actual object RunnerTerminalService {
         windowId: String,
         terminalId: String,
     ): Boolean {
+        val callerContext = currentCoroutineContext()
         val stillOurs =
             stateLock.withLock {
-                _configToTerminal.value[config.id] == terminalId &&
-                    _configToWindows.value[config.id]?.contains(windowId) == true
-            }
-
-        if (!currentCoroutineContext().isActive) {
-            if (stillOurs) {
-                stateLock.withLock {
+                val ownsTerminal =
+                    _configToTerminal.value[config.id] == terminalId &&
+                        _configToWindows.value[config.id]?.contains(windowId) == true
+                // Ownership and rollback must share the lock so a newer run cannot be erased.
+                if (!callerContext.isActive && ownsTerminal) {
                     _configToTerminal.update { it - config.id }
                     removeConfigFromTerminal(terminalId, config.id)
                     _runningConfigs.update { it - config.id }
                     removeWindowFromConfig(config.id, windowId)
                 }
+                ownsTerminal
             }
-            currentCoroutineContext().ensureActive()
-        }
+        callerContext.ensureActive()
 
         if (!stillOurs) {
             logger.debug(
@@ -443,7 +442,7 @@ actual object RunnerTerminalService {
      * (`TerminalAPIAccess.wireRunnerCallbacks`) only registers `setOnRunnerTerminalRemoved` /
      * `setOnRunnerConfigRemoved`, which reach [removeTerminal] / [removeConfig], not this. A real
      * process-exit signal (as opposed to a tab being closed) would need a third plugin callback
-     * that does not exist yet. See [removeTerminal] for where exit notification actually lives.
+     * that does not exist yet. Exit notification remains unsupported; see [removeTerminal].
      */
     actual fun markTerminalStopped(terminalId: String) {
         stateLock.withLock {
