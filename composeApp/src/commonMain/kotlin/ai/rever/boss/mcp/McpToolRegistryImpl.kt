@@ -803,6 +803,60 @@ internal class McpToolRegistryCore(
         }
     }
 
+    /** Recheck access before saving a queued ALLOW; a failed write never authorizes execution. */
+    @Suppress("ReturnCount") // Ordered denial, access revocation, persistence and write-failure outcomes.
+    private suspend fun validateApproval(
+        tool: RegisteredMcpTool,
+        authorization: Pair<McpApprovalDisposition, String?>,
+    ): Pair<McpApprovalDisposition, String?> =
+        withContext(Dispatchers.IO) {
+            if (authorization.second != null) return@withContext authorization
+            val toolName = tool.definition.name
+            if (_tools.value.none { it.providerId == tool.providerId && it.definition === tool.definition } ||
+                policyEngine.policyFor(toolName) == McpPolicyAction.DENY
+            ) {
+                return@withContext McpApprovalDisposition.POLICY_DENIED to
+                    "MCP tool access revoked while awaiting approval"
+            }
+            if (authorization.first != McpApprovalDisposition.PERSISTENTLY_ALLOWED ||
+                policyEngine.setToolPolicy(toolName, McpPolicyAction.ALLOW, preserveDeny = true)
+            ) {
+                return@withContext authorization
+            }
+            val disposition =
+                if (policyEngine.policyFor(toolName) == McpPolicyAction.DENY) {
+                    McpApprovalDisposition.POLICY_DENIED
+                } else {
+                    McpApprovalDisposition.POLICY_PERSIST_FAILED
+                }
+            disposition to "MCP persistent approval was not saved; tool execution withheld"
+        }
+
+    private suspend fun approvedAuthorization(
+        tool: RegisteredMcpTool,
+        decision: McpApprovalDecision.Approved,
+    ): Pair<McpApprovalDisposition, String?> {
+        if (decision.persistPolicy) {
+            return validateApproval(tool, McpApprovalDisposition.PERSISTENTLY_ALLOWED to null)
+        }
+        val disposition =
+            if (decision.trustForSession) {
+                McpApprovalDisposition.SESSION_TRUSTED
+            } else {
+                McpApprovalDisposition.APPROVED_ONCE
+            }
+        return disposition to null
+    }
+
+    private suspend fun persistentDenialDisposition(toolName: String): McpApprovalDisposition =
+        withContext(Dispatchers.IO) {
+            if (policyEngine.setToolPolicy(toolName, McpPolicyAction.DENY)) {
+                McpApprovalDisposition.PERSISTENTLY_DENIED
+            } else {
+                McpApprovalDisposition.POLICY_PERSIST_FAILED
+            }
+        }
+
     private suspend fun authorizeInvocation(
         tool: RegisteredMcpTool,
         args: McpToolArgs,
@@ -828,32 +882,13 @@ internal class McpToolRegistryCore(
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        val disposition =
-                            when {
-                                // Persisted takes precedence over session trust when both are
-                                // somehow set: a rule on disk survives restarts, session trust
-                                // does not, and there's nothing left for the weaker scope to add.
-                                decision.persistPolicy -> {
-                                    policyEngine.setToolPolicy(tool.definition.name, McpPolicyAction.ALLOW)
-                                    McpApprovalDisposition.PERSISTENTLY_ALLOWED
-                                }
-
-                                decision.trustForSession -> {
-                                    McpApprovalDisposition.SESSION_TRUSTED
-                                }
-
-                                else -> {
-                                    McpApprovalDisposition.APPROVED_ONCE
-                                }
-                            }
-                        disposition to null
+                        approvedAuthorization(tool, decision)
                     }
 
                     is McpApprovalDecision.Denied -> {
                         val disposition =
                             if (decision.persistPolicy) {
-                                policyEngine.setToolPolicy(tool.definition.name, McpPolicyAction.DENY)
-                                McpApprovalDisposition.PERSISTENTLY_DENIED
+                                persistentDenialDisposition(tool.definition.name)
                             } else {
                                 McpApprovalDisposition.DENIED_BY_OPERATOR
                             }

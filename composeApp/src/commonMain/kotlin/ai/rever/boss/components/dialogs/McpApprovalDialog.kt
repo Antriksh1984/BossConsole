@@ -231,6 +231,14 @@ fun McpApprovalDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                Text(
+                    "Always choices apply to this tool name for all agents and arguments, across restarts " +
+                        "and replacement plugins. " +
+                        "To change a saved rule, edit ~/.boss/mcp-tool-policy.json and restart BOSS.",
+                    color = colors.textSecondary,
+                    fontSize = 11.sp,
+                )
+
                 // Persistent-scope actions: a rule written to disk, surviving a restart - kept
                 // visually secondary to the actions below since they are the more consequential,
                 // less common choice.
@@ -253,7 +261,7 @@ fun McpApprovalDialog(
 
                     TextButton(
                         onClick = { onApprove(false, true) },
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.textSecondary),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.warn),
                     ) {
                         Text("Always Allow", fontSize = 11.sp)
                     }

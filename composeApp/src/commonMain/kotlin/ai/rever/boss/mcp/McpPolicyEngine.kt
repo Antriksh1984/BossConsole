@@ -125,13 +125,16 @@ class McpPolicyEngine(
     }
 
     /**
-     * Set a persistent policy rule for [toolName].
+     * Set a persistent policy rule for [toolName], returning whether it was saved.
+     * [preserveDeny] keeps a queued approval from replacing a newer denial.
      */
     fun setToolPolicy(
         toolName: String,
         action: McpPolicyAction,
-    ) {
+        preserveDeny: Boolean = false,
+    ): Boolean =
         synchronized(lock) {
+            if (preserveDeny && policyFor(toolName) == McpPolicyAction.DENY) return@synchronized false
             val updated = _config.value.copy(rules = _config.value.rules + (toolName to action))
             val error = persistConfig(updated)
             if (error != null) {
@@ -143,6 +146,7 @@ class McpPolicyEngine(
                     "Failed to persist MCP policy update",
                     mapOf("tool" to toolName, "error" to error),
                 )
+                false
             } else {
                 _config.value = updated
                 _fault.value = null
@@ -151,9 +155,9 @@ class McpPolicyEngine(
                     "Updated tool policy",
                     mapOf("tool" to toolName, "action" to action.name),
                 )
+                true
             }
         }
-    }
 
     // An absent file uses defaults; I/O and JSON failures withhold tools.
     @Suppress("ReturnCount", "TooGenericExceptionCaught")

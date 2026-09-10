@@ -29,6 +29,7 @@ enum class McpApprovalDisposition {
     // scopes (once, session, persistent) the operator actually chose.
     PERSISTENTLY_ALLOWED,
     PERSISTENTLY_DENIED,
+    POLICY_PERSIST_FAILED,
     DENIED_BY_OPERATOR,
     TIMEOUT,
     POLICY_DENIED,

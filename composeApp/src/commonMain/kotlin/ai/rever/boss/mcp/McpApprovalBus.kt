@@ -25,8 +25,7 @@ sealed interface McpApprovalDecision {
         /**
          * Write this tool's policy to `~/.boss/mcp-tool-policy.json` as ALLOW, so it never
          * suspends for approval again - across restarts, not just this session. Independent
-         * of [trustForSession]: a persisted ALLOW makes session trust redundant (`policyFor`
-         * checks the configured rule first), so the registry does not also call
+         * of [trustForSession]: a persisted ALLOW makes session trust redundant, so the registry does not also call
          * `trustForSession` when this is true.
          */
         val persistPolicy: Boolean = false,
