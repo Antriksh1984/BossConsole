@@ -1,6 +1,7 @@
 package ai.rever.boss.settings
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.atomicWriteText
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -39,10 +40,46 @@ object MicrokernelModePreference {
     private val _saveState = MutableStateFlow(MicrokernelModeSaveState())
     internal val saveState = _saveState.asStateFlow()
 
-    suspend fun refresh() =
+    // Latched from the FIRST refresh() this process makes, never updated after - this is "what
+    // env_vars said when BOSS started", which is the comparand "restart required" actually needs.
+    // ConfigLoader.getConfig("BOSS_MODE") looks like the right answer to that question and isn't:
+    // it resolves from an env var / system property / local.properties / the embedded build
+    // config, and nothing in this repo loads env_vars into any of those, so on an ordinary
+    // install it is permanently false and the banner it used to drive could never clear after an
+    // actual restart (or could never appear for someone who does export BOSS_MODE). See #472's
+    // review. Whole-hog fix (making env_vars actually reach the running process) is #391's.
+    private var startupEnabledLatched: Boolean? = null
+
+    /**
+     * [envFile] defaults to the real `env_vars` file; exists as a parameter only so a test can
+     * simulate "the process starting" against an isolated file - see [isEnabled].
+     */
+    suspend fun refresh(envFile: File = BossDirectories.resolve("env_vars")) =
         mutex.withLock {
-            _saveState.value = _saveState.value.copy(enabled = isEnabled())
+            val current = isEnabled(envFile)
+            if (startupEnabledLatched == null) {
+                startupEnabledLatched = current
+            }
+            _saveState.value =
+                _saveState.value.copy(
+                    enabled = current,
+                    startupEnabled = startupEnabledLatched,
+                    // A fresh read is also the point at which a stale save error stops being
+                    // useful - most concretely, reopening Settings after seeing one.
+                    saveFailed = false,
+                )
         }
+
+    /**
+     * Forgets the latched startup snapshot and resets published state to its construction-time
+     * default. Test-only: [startupEnabledLatched] is deliberately latched once per real process
+     * and has no other reset seam, which would otherwise make every test after the first
+     * [refresh] call in a JVM run see a stale snapshot from whichever test happened to run first.
+     */
+    internal fun forgetStartupSnapshotForTest() {
+        startupEnabledLatched = null
+        _saveState.value = MicrokernelModeSaveState()
+    }
 
     /** Finish publication even if the window closes while the file write is in progress. */
     internal suspend fun saveAndPublish(
@@ -54,7 +91,7 @@ object MicrokernelModePreference {
                 val result = write()
                 _saveState.value =
                     if (result.isSuccess) {
-                        MicrokernelModeSaveState(enabled = enabled)
+                        MicrokernelModeSaveState(enabled = enabled, startupEnabled = startupEnabledLatched)
                     } else {
                         _saveState.value.copy(saveFailed = true)
                     }
@@ -105,9 +142,8 @@ object MicrokernelModePreference {
                 envFile.parentFile?.mkdirs()
 
                 if (!envFile.exists()) {
-                    envFile.writeText(
+                    envFile.atomicWriteText(
                         if (enabled) "BOSS_MODE=KERNEL\n" else "# BOSS_MODE=KERNEL\n",
-                        Charsets.UTF_8,
                     )
                     return@withContext Result.success(Unit)
                 }
@@ -132,7 +168,13 @@ object MicrokernelModePreference {
                     modeLineIndices.drop(1).reversed().forEach { lines.removeAt(it) }
                 }
 
-                envFile.writeText(lines.joinToString("\n") + "\n", Charsets.UTF_8)
+                // env_vars is also where the secret-manager plugin resolves API keys from - a
+                // truncate-on-open write left mid-flight (disk full, killed process, a Windows
+                // lock) would destroy every unrelated key in it, not just this one. Write a
+                // sibling temp file and move it into place instead, the same pattern this repo
+                // already uses for exactly this hazard (StoreMissingDependencyInstaller's
+                // `.jar.part`).
+                envFile.atomicWriteText(lines.joinToString("\n") + "\n")
                 Result.success(Unit)
             } catch (e: IOException) {
                 Result.failure(e)
@@ -158,15 +200,19 @@ fun needsMicrokernelModeConfirmation(
 internal data class MicrokernelModeSaveState(
     val enabled: Boolean? = null,
     val saveFailed: Boolean = false,
-)
+    // What env_vars said the FIRST time this process read it - see the KDoc on
+    // MicrokernelModePreference.startupEnabledLatched for why this, and not a live
+    // ConfigLoader read, is the correct "what is actually running" comparand.
+    val startupEnabled: Boolean? = null,
+) {
+    val needsRestart: Boolean
+        get() = enabled != null && startupEnabled != null && enabled != startupEnabled
+}
 
-internal fun microkernelModeMenuLabel(
-    state: MicrokernelModeSaveState,
-    runningEnabled: Boolean,
-): String =
+internal fun microkernelModeMenuLabel(state: MicrokernelModeSaveState): String =
     when {
         state.saveFailed -> "Microkernel Mode (save failed - retry)"
-        state.enabled != null && state.enabled != runningEnabled -> "Microkernel Mode (restart required)"
+        state.needsRestart -> "Microkernel Mode (restart required)"
         else -> "Microkernel Mode"
     }
 

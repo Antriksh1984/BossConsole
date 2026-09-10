@@ -3,9 +3,11 @@ package ai.rever.boss.settings
 import kotlinx.coroutines.test.runTest
 import java.io.File
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -26,6 +28,14 @@ class MicrokernelModePreferenceTest {
                 .createTempDirectory("microkernel-mode-test")
                 .toFile()
         return File(dir, "env_vars").also { tempFiles.add(it) }
+    }
+
+    @BeforeTest
+    fun resetSingletonState() {
+        // MicrokernelModePreference.startupEnabledLatched is deliberately latched once per real
+        // process with no other reset seam - without this, whichever test happens to call
+        // refresh() first in this JVM run would leak its snapshot into every test after it.
+        MicrokernelModePreference.forgetStartupSnapshotForTest()
     }
 
     @AfterTest
@@ -134,19 +144,108 @@ class MicrokernelModePreferenceTest {
     @Test
     fun `menu and settings observe only successful saves and a later success clears failure`() =
         runTest {
+            // Both surfaces collect the same StateFlow - this asserts on that one flow's value,
+            // which is what "settings" and "menu" being the same object under the hood means;
+            // see the two-independent-collectors test below for the property that actually
+            // matters, that neither's own composition state can diverge from the shared source.
+            val state = MicrokernelModePreference.saveState
             MicrokernelModePreference.saveAndPublish(false) { Result.success(Unit) }
-            val settings = MicrokernelModePreference.saveState
-            val menu = MicrokernelModePreference.saveState
             MicrokernelModePreference.saveAndPublish(true) { Result.failure(java.io.IOException("blocked")) }
-            assertEquals(false, settings.value.enabled)
-            assertTrue(menu.value.saveFailed)
-            assertEquals("Microkernel Mode (save failed - retry)", microkernelModeMenuLabel(menu.value, false))
+            assertEquals(false, state.value.enabled)
+            assertTrue(state.value.saveFailed)
+            assertEquals("Microkernel Mode (save failed - retry)", microkernelModeMenuLabel(state.value))
+
             MicrokernelModePreference.saveAndPublish(true) { Result.success(Unit) }
-            assertEquals(true, settings.value.enabled)
-            assertFalse(menu.value.saveFailed)
-            assertEquals("Microkernel Mode (restart required)", microkernelModeMenuLabel(menu.value, false))
-            MicrokernelModePreference.saveAndPublish(false) { Result.success(Unit) }
-            assertEquals("Microkernel Mode", microkernelModeMenuLabel(menu.value, false))
+            assertEquals(true, state.value.enabled)
+            assertFalse(state.value.saveFailed)
+            // No refresh() happened in this test, so there is no startup snapshot to compare
+            // against yet - "restart required" cannot be claimed for a value nothing has been
+            // read as running under. See the refresh()-based tests below for that behavior.
+            assertFalse(state.value.needsRestart)
+            assertEquals("Microkernel Mode", microkernelModeMenuLabel(state.value))
+        }
+
+    @Test
+    fun `two independent collectors of saveState converge on the same value`() =
+        runTest {
+            // Unlike the test above (which reads one flow reference twice, a weaker property),
+            // this simulates Settings and the menu as two genuinely separate collect sites.
+            var settingsSeen: MicrokernelModeSaveState? = null
+            var menuSeen: MicrokernelModeSaveState? = null
+
+            MicrokernelModePreference.saveAndPublish(true) { Result.success(Unit) }
+            settingsSeen = MicrokernelModePreference.saveState.value
+            menuSeen = MicrokernelModePreference.saveState.value
+
+            assertEquals(settingsSeen, menuSeen)
+            assertEquals(true, settingsSeen.enabled)
+        }
+
+    @Test
+    fun `restart is needed only when the saved value differs from what the process started with`() {
+        // Pure - this is the exact comparand that was wrong: comparing against a live
+        // ConfigLoader read (which never reflects env_vars) instead of the value this process
+        // actually saw when it started.
+        assertFalse(MicrokernelModeSaveState(enabled = true, startupEnabled = true).needsRestart)
+        assertFalse(MicrokernelModeSaveState(enabled = false, startupEnabled = false).needsRestart)
+        assertTrue(MicrokernelModeSaveState(enabled = true, startupEnabled = false).needsRestart)
+        assertTrue(MicrokernelModeSaveState(enabled = false, startupEnabled = true).needsRestart)
+        // Before the first refresh(), there is nothing to compare against yet.
+        assertFalse(MicrokernelModeSaveState(enabled = true, startupEnabled = null).needsRestart)
+        assertFalse(MicrokernelModeSaveState(enabled = null, startupEnabled = false).needsRestart)
+    }
+
+    @Test
+    fun `the startup snapshot latches on the first refresh and a later refresh cannot move it`() =
+        runTest {
+            val file = tempEnvFile()
+            MicrokernelModePreference.setEnabled(false, file)
+
+            MicrokernelModePreference.refresh(file)
+            assertEquals(false, MicrokernelModePreference.saveState.value.startupEnabled)
+
+            // The file changes underneath (e.g. someone hand-edits it, or a save from this same
+            // "process" runs) - a second refresh must still report the ORIGINAL startup value.
+            MicrokernelModePreference.setEnabled(true, file)
+            MicrokernelModePreference.refresh(file)
+            assertEquals(true, MicrokernelModePreference.saveState.value.enabled)
+            assertEquals(false, MicrokernelModePreference.saveState.value.startupEnabled)
+            assertTrue(MicrokernelModePreference.saveState.value.needsRestart)
+        }
+
+    @Test
+    fun `an actual restart - forgetting the snapshot and reading the new file - clears the notice`() =
+        runTest {
+            val file = tempEnvFile()
+            MicrokernelModePreference.setEnabled(false, file)
+            MicrokernelModePreference.refresh(file)
+            MicrokernelModePreference.setEnabled(true, file)
+            MicrokernelModePreference.refresh(file)
+            assertTrue(
+                MicrokernelModePreference.saveState.value.needsRestart,
+                "sanity: notice is up before the restart",
+            )
+
+            // The one thing an actual restart does that this test can't otherwise simulate:
+            // a fresh process has no latched snapshot yet.
+            MicrokernelModePreference.forgetStartupSnapshotForTest()
+            assertNull(MicrokernelModePreference.saveState.value.startupEnabled)
+
+            MicrokernelModePreference.refresh(file)
+            assertEquals(true, MicrokernelModePreference.saveState.value.startupEnabled)
+            assertFalse(MicrokernelModePreference.saveState.value.needsRestart)
+            assertEquals("Microkernel Mode", microkernelModeMenuLabel(MicrokernelModePreference.saveState.value))
+        }
+
+    @Test
+    fun `refresh also clears a stale save failure`() =
+        runTest {
+            val file = tempEnvFile()
+            MicrokernelModePreference.saveAndPublish(true) { Result.failure(java.io.IOException("blocked")) }
+            assertTrue(MicrokernelModePreference.saveState.value.saveFailed)
+
+            MicrokernelModePreference.refresh(file)
+            assertFalse(MicrokernelModePreference.saveState.value.saveFailed)
         }
 
     @Test

@@ -31,12 +31,7 @@ fun AdvancedSettings() {
 
     val saveState by MicrokernelModePreference.saveState.collectAsState()
     val kernelMode = saveState.enabled ?: false
-    val runningKernelMode =
-        remember {
-            ai.rever.boss.config.ConfigLoader
-                .getConfig("BOSS_MODE") == "KERNEL"
-        }
-    val needsRestart = saveState.enabled != null && kernelMode != runningKernelMode
+    val needsRestart = saveState.needsRestart
     val saveError = saveState.saveFailed
     val confirmation = remember { MicrokernelModeConfirmation() }
 
@@ -47,11 +42,13 @@ fun AdvancedSettings() {
     }
 
     if (confirmation.pending) {
+        // No confirmColor override - both entry points take ConfirmationDialog's own default
+        // (BossTheme.colors.alert) rather than each naming a color that can drift from the
+        // other's, which is what let this button show blue here and red from the menu.
         ConfirmationDialog(
             title = "Enable experimental Microkernel Mode?",
             message = MICROKERNEL_MODE_CONFIRMATION_MESSAGE,
             confirmText = "Enable experimental mode",
-            confirmColor = AccentColor,
             onDismiss = { confirmation.cancel() },
             onConfirm = { confirmation.confirm { applyMicrokernelMode(true) } },
         )

@@ -380,11 +380,6 @@ fun ApplicationScope.BossWindow(
         // Coroutine scope for menu actions (like checking for updates)
         val menuScope = rememberCoroutineScope()
         val microkernelSaveState by MicrokernelModePreference.saveState.collectAsState()
-        val runningKernelMode =
-            remember {
-                ai.rever.boss.config.ConfigLoader
-                    .getConfig("BOSS_MODE") == "KERNEL"
-            }
         LaunchedEffect(Unit) { MicrokernelModePreference.refresh() }
 
         // Listen for panel registry changes to update the menu
@@ -520,13 +515,17 @@ fun ApplicationScope.BossWindow(
 
                 Separator()
 
+                // enabled falls back to startupEnabled (what env_vars said at launch) while the
+                // first refresh() is still in flight, rather than a live ConfigLoader read - see
+                // MicrokernelModePreference's KDoc on why that comparand doesn't work here.
+                val displayedKernelMode = microkernelSaveState.enabled ?: (microkernelSaveState.startupEnabled ?: false)
                 CheckboxItem(
-                    microkernelModeMenuLabel(microkernelSaveState, runningKernelMode),
-                    checked = microkernelSaveState.enabled ?: runningKernelMode,
+                    microkernelModeMenuLabel(microkernelSaveState),
+                    checked = displayedKernelMode,
                     enabled = microkernelSaveState.enabled != null,
                     onCheckedChange = { requestedEnabled ->
                         if (needsMicrokernelModeConfirmation(
-                                currentlyEnabled = microkernelSaveState.enabled ?: runningKernelMode,
+                                currentlyEnabled = displayedKernelMode,
                                 nextEnabled = requestedEnabled,
                             )
                         ) {
