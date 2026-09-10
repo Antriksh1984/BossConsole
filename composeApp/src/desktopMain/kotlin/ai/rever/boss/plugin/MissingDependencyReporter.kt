@@ -10,6 +10,7 @@ import ai.rever.boss.components.plugin.PluginDependencyResolution
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.ApiClassLoader
 import ai.rever.boss.plugin.sandbox.ui.PluginCrashRegistry
+import ai.rever.boss.utils.WindowFocusManager
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import java.io.File
@@ -70,6 +71,12 @@ class MissingDependencyReporter(
             val installed = installedPluginIds()
             logUnofferable(manifest, installed)
 
+            // Best-effort: the window that is actionable right now, at the moment the install
+            // this dependency was found on finishes. Same imprecision every other consumer of
+            // resolveActionableWindowId already accepts (deep links, CLI commands) - not a new
+            // standard, just applied here too so the prompt has a window to prefer.
+            val windowId = WindowFocusManager.resolveActionableWindowId()
+
             PluginDependencyResolution
                 .missingFor(manifest, installed)
                 .forEach { missing ->
@@ -82,7 +89,7 @@ class MissingDependencyReporter(
                             "optional" to missing.optional,
                         ),
                     )
-                    bus.report(MissingDependencyPrompt(missing, installer))
+                    bus.report(MissingDependencyPrompt(missing, installer, windowId = windowId))
                 }
         }.onFailure { error ->
             logger.warn(

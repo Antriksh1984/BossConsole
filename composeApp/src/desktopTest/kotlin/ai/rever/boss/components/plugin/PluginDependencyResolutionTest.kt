@@ -923,3 +923,94 @@ class PluginDependentsTest {
         )
     }
 }
+
+/**
+ * Which window should show a missing-dependency prompt, in a multi-window session.
+ *
+ * `PluginDependencyBus` delivers over a `Channel`: exactly one collector receives each prompt,
+ * but not necessarily the window whose install raised it (see `PluginDependencyBusTest` above
+ * for that delivery guarantee itself, which this does not change). `shouldClaimMissingDependencyPrompt`
+ * is the decision a wrongly-chosen collector uses to hand the prompt back instead of showing it -
+ * kept pure and tested here the same way `shouldShowMissingDependency` is, without needing a real
+ * `WindowFocusManager` or a second window.
+ */
+class MissingDependencyPromptRoutingTest {
+    private val noopInstaller =
+        object : MissingDependencyInstaller {
+            override fun isInstalled(pluginId: String): Boolean = false
+
+            override suspend fun displayNameFor(pluginId: String): String? = null
+
+            override suspend fun install(pluginId: String): Result<Unit> = Result.success(Unit)
+        }
+
+    private fun prompt(windowId: String?) =
+        MissingDependencyPrompt(
+            missing = MissingPluginDependency("com.example.d", "Dependent", "com.example.missing", optional = false),
+            installer = noopInstaller,
+            windowId = windowId,
+        )
+
+    @Test
+    fun `a prompt with no reporting window is claimed by whoever collects it`() {
+        // Every call site before this field existed, and any that still don't set one -
+        // behaviour must be unchanged: the first window to collect shows it.
+        assertTrue(
+            shouldClaimMissingDependencyPrompt(
+                prompt = prompt(windowId = null),
+                collectorWindowId = "window-a",
+                targetWindowOpen = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `the reporting window always claims its own prompt`() {
+        assertTrue(
+            shouldClaimMissingDependencyPrompt(
+                prompt = prompt(windowId = "window-a"),
+                collectorWindowId = "window-a",
+                // Whether the target is "open" is irrelevant when the collector IS the target -
+                // a window is always open from its own point of view.
+                targetWindowOpen = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a different window declines to claim it while the reporting window is still open`() {
+        assertFalse(
+            shouldClaimMissingDependencyPrompt(
+                prompt = prompt(windowId = "window-a"),
+                collectorWindowId = "window-b",
+                targetWindowOpen = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a different window claims it once the reporting window has closed`() {
+        // The reporting window closed before answering - a prompt must never wait forever
+        // for a window that no longer exists, so any remaining window falls back to showing it.
+        assertTrue(
+            shouldClaimMissingDependencyPrompt(
+                prompt = prompt(windowId = "window-a"),
+                collectorWindowId = "window-b",
+                targetWindowOpen = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `the single-window case is unaffected regardless of the open flag`() {
+        // In the overwhelmingly common case there is exactly one window, so it is both the
+        // reporter and the collector - the second clause is what keeps this path unchanged.
+        assertTrue(
+            shouldClaimMissingDependencyPrompt(
+                prompt = prompt(windowId = "the-only-window"),
+                collectorWindowId = "the-only-window",
+                targetWindowOpen = false,
+            ),
+        )
+    }
+}

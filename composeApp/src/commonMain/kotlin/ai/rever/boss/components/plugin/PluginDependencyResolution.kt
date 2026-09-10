@@ -311,18 +311,26 @@ interface MissingDependencyInstaller {
  * bound to the `DynamicPluginManager` that reported - one per window - so Install always loads
  * the dependency into the manager that was actually missing it, whichever window asks.
  *
- * **Known limitation, with more than one window open.** Delivery is to whichever window
- * collects first, which is not necessarily the one that reported. The install is still correct
- * (the jar lands on disk and loads into the reporting window's manager), but the person who
- * answered may see nothing change in the window they were looking at until the next launch.
- * Routing back to the reporting window would need the prompt to carry a window id and the
- * collector to be able to decline one without consuming it - a claim registry rather than a
- * channel. Not built, because a single window is the overwhelmingly common case and the
- * consequence is cosmetic.
+ * **With more than one window open**, [windowId] is a best-effort claim on which window should
+ * show this: [shouldClaimMissingDependencyPrompt] decides whether the window that collects it
+ * off the bus is the right one to show it, or should leave it for [windowId]'s own window
+ * instead - see that function's KDoc for what "leave it" means with a channel rather than a
+ * claim registry. A null [windowId] (no resolvable reporting window, or a call site that never
+ * set one) behaves exactly as before this field existed: whichever window collects it shows it.
  */
 data class MissingDependencyPrompt(
     val missing: MissingPluginDependency,
     val installer: MissingDependencyInstaller,
+    /**
+     * Best-effort id of the window that triggered the install this dependency was found on,
+     * resolved via `WindowFocusManager.resolveActionableWindowId()` at report time - the same
+     * "whichever window is actionable right now" idiom this codebase already uses for deep
+     * links and CLI commands. Not perfectly precise (the actionable window can change between
+     * a click and an async install completing), and not every report call site sets it, but it
+     * is the difference between "delivered to a uniformly random window" and "usually delivered
+     * to the right one."
+     */
+    val windowId: String? = null,
     /**
      * True when a person asked for this directly, by pressing a control that needs the plugin.
      *
@@ -489,6 +497,35 @@ fun shouldShowMissingDependency(
     present: Boolean,
     declined: Boolean,
 ): Boolean = !present && (prompt.userInitiated || !declined)
+
+/**
+ * Whether the window at [collectorWindowId] should show [prompt] itself, rather than leave it
+ * for [MissingDependencyPrompt.windowId]'s own window.
+ *
+ * [PluginDependencyBus] delivers over a `Channel`, which hands each prompt to exactly one
+ * collector - whichever window's `collect` happens to be ready first, not necessarily the one
+ * whose install raised it. This function is the other half of closing that gap: a window that
+ * gets a prompt meant for someone else calls [PluginDependencyBus.report] again with the same
+ * prompt rather than showing it, so it goes back into the channel for another window - hopefully
+ * the right one - to try. That "put it back" behaviour lives at the collector, not here; this is
+ * only the yes/no decision, kept pure and testable the same way [shouldShowMissingDependency] is.
+ *
+ * [targetWindowOpen] is passed in rather than resolved here for the same reason: whether a window
+ * id is still live is a `WindowFocusManager` question, and this function should stay answerable
+ * from a plain boolean rather than a real window registry.
+ *
+ * True whenever there is no reporting window to prefer ([MissingDependencyPrompt.windowId] is
+ * null - every call site before this field existed, and any that still don't set it), whenever
+ * [collectorWindowId] IS the reporting window, or whenever the reporting window is simply gone -
+ * a prompt must never wait forever for a window that closed before answering it, which is exactly
+ * how the single-window case (by far the most common) keeps working unchanged: its own window id
+ * always matches on the second clause.
+ */
+fun shouldClaimMissingDependencyPrompt(
+    prompt: MissingDependencyPrompt,
+    collectorWindowId: String,
+    targetWindowOpen: Boolean,
+): Boolean = prompt.windowId == null || prompt.windowId == collectorWindowId || !targetWindowOpen
 
 /** The bus the host actually uses. */
 object PluginDependencyEventBus : PluginDependencyBus()
