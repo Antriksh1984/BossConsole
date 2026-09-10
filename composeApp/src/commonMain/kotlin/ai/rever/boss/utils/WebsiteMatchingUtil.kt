@@ -10,7 +10,7 @@ import ai.rever.boss.utils.logging.LogCategory
  * Handles:
  * - Domain extraction from URLs
  * - Subdomain normalization (login.google.com → google.com)
- * - Fuzzy matching between secret website and current domain
+ * - Exact and dot-boundary matching between secret website and current domain
  * - Scoring and ranking of matched secrets
  *
  * Used by Issue #56 - Secret Access Integration with Fluck Browser
@@ -120,16 +120,10 @@ object WebsiteMatchingUtil {
      * - Exact match (google.com == google.com): score 1.0
      * - Subdomain match (login.google.com vs google.com): score 0.9
      *
-     * Deliberately just these two. A credential surface should favor precision over recall:
-     * exact-plus-subdomain is what a password manager keys on, covers every legitimate case,
-     * and cannot put a secret in front of a domain the user is not actually on. An earlier
-     * token-overlap "partial" tier (matching on any shared word after splitting on `.`/`-`/`_`)
-     * was removed for exactly that reason - filtering bare TLD labels ("com", "org", ...) out
-     * of the comparison closed the "every .com secret matches every .com site" case
-     * (BossConsole#460), but the tier still matched two different registrable domains that
-     * merely share a brand-ish label (`apple.com` vs `apple.org`, `google.com` vs
-     * `google-workspace.com`) - the same wrong-site-credential problem, just narrower. See
-     * [WebsiteMatchingUtilTest] for the cross-domain cases this is required not to match.
+     * Substrings and shared labels do not establish a domain relationship and must not
+     * produce credential suggestions. Only equality and a dot-delimited suffix qualify.
+     * This scorer does not validate public suffixes; [extractMainDomain] retains its existing
+     * limited suffix handling, so this is not a complete registrable-domain policy.
      *
      * @param domain Current website domain (e.g., "google.com")
      * @param secrets List of all available secrets
