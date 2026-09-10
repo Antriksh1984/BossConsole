@@ -9,6 +9,7 @@ import ai.rever.boss.window.WindowProjectState
 import ai.rever.boss.window.selectProjectInWindow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,10 +18,19 @@ import kotlinx.coroutines.launch
 /**
  * Implementation of ProjectDataProvider that wraps ProjectState.
  * Converts between composeApp's Project type and plugin's ProjectData type.
+ *
+ * Built per window ([DefaultPlugin]'s `projectDataProviderDelegate`), but [scope]'s collector
+ * subscribes to [ProjectState.recentProjects] - a process-wide singleton, not this window's own
+ * state - so it outlives the window unless [dispose] cancels it (BossConsole#520). Because the
+ * collector target is process-wide, [ai.rever.boss.kernel.services.ProjectDataServiceBridge]
+ * deliberately does NOT read [recentProjects] here: a KERNEL client watching it would freeze at
+ * whatever this instance last saw the moment its window's [dispose] runs. That bridge reads
+ * [ProjectState.recentProjects] directly instead, which is what makes disposing this safe.
  */
 class ProjectDataProviderImpl(
     private val windowProjectState: WindowProjectState?,
-) : ProjectDataProvider {
+) : ProjectDataProvider,
+    DisposableProvider {
     private val scope = CoroutineScope(Dispatchers.Main)
 
     // Map ProjectState's recentProjects to plugin's ProjectData type
@@ -54,6 +64,11 @@ class ProjectDataProviderImpl(
                 windowId = windowProjectState?.windowId ?: "",
             ),
         )
+    }
+
+    /** Stops mirroring [ProjectState.recentProjects] into [recentProjects]. See the class KDoc. */
+    override fun dispose() {
+        scope.cancel()
     }
 
     // Extension functions for type conversion

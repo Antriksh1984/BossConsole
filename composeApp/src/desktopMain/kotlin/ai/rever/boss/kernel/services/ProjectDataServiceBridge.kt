@@ -1,5 +1,6 @@
 package ai.rever.boss.kernel.services
 
+import ai.rever.boss.components.plugin.panels.left_top.ProjectState
 import ai.rever.boss.ipc.proto.Empty
 import ai.rever.boss.ipc.proto.services.*
 import ai.rever.boss.plugin.api.ProjectData
@@ -10,9 +11,16 @@ import kotlinx.coroutines.flow.flow
 class ProjectDataServiceBridge(
     private val provider: ProjectDataProvider,
 ) : ProjectDataServiceGrpcKt.ProjectDataServiceCoroutineImplBase() {
+    /**
+     * Deliberately reads [ProjectState.recentProjects] - the process-wide singleton - rather than
+     * [provider]'s own [ProjectDataProvider.recentProjects]. The latter is a per-window mirror
+     * (`ProjectDataProviderImpl`) that stops updating once its owning window disposes it
+     * (BossConsole#520); a KERNEL client watching it would freeze at whatever it last saw. This
+     * stream has no such owner to outlive, so it keeps working across every window's lifecycle.
+     */
     override fun watchRecentProjects(request: Empty): Flow<ProjectListResponse> =
         flow {
-            provider.recentProjects.collect { projects ->
+            ProjectState.recentProjects.collect { projects ->
                 emit(
                     ProjectListResponse
                         .newBuilder()
