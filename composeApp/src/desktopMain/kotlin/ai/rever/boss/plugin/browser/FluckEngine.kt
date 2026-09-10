@@ -10,6 +10,7 @@ import ai.rever.boss.config.JxBrowserConfig
 import ai.rever.boss.platform.FileNameSanitizer
 import ai.rever.boss.platform.FileSystemUtils
 import ai.rever.boss.platform.MacOSScreenCapture
+import ai.rever.boss.platform.confirmExecutableDownload
 import ai.rever.boss.platform.pickSaveFile
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.plugin.ui.BossThemeController
@@ -3263,9 +3264,14 @@ object FluckEngine {
 
                     // Warn for executable files
                     if (downloadSettings.warnForExecutables &&
-                        FileNameSanitizer.isExecutableFile(sanitizedFileName)
+                        FileNameSanitizer.isExecutableFile(sanitizedFileName) &&
+                        !confirmExecutableDownload(savedFileName)
                     ) {
-                        // TODO: Show user warning dialog (for now, just proceed)
+                        // Same cleanup as the parent-directory-failure bail above: none of
+                        // the three terminal handlers will run, so the claim is released here.
+                        FileSystemUtils.releaseFilePath(savePath, owner = downloadId)
+                        action.cancel()
+                        return@StartDownloadCallback
                     }
 
                     // Start the download

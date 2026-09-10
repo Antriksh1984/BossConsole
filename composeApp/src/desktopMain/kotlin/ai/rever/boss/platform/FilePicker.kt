@@ -7,6 +7,7 @@ import androidx.compose.runtime.remember
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
 
 private val filePickerLogger = BossLogger.forComponent("FilePicker")
@@ -128,4 +129,31 @@ actual fun pickSaveFile(
     }
 
     return result
+}
+
+/**
+ * Desktop implementation of confirmExecutableDownload using a Swing confirm dialog.
+ * Runs synchronously on the EDT, same threading requirement as [pickSaveFile].
+ */
+actual fun confirmExecutableDownload(fileName: String): Boolean {
+    var proceed = false
+
+    try {
+        SwingUtilities.invokeAndWait {
+            val choice =
+                JOptionPane.showConfirmDialog(
+                    null,
+                    "\"$fileName\" is an executable file. Only download and run it if you trust its source.",
+                    "Confirm download",
+                    JOptionPane.OK_CANCEL_OPTION,
+                    JOptionPane.WARNING_MESSAGE,
+                )
+            proceed = choice == JOptionPane.OK_OPTION
+        }
+    } catch (e: Exception) {
+        filePickerLogger.warn(LogCategory.FILE, "Error showing executable download warning", error = e)
+        proceed = false
+    }
+
+    return proceed
 }
