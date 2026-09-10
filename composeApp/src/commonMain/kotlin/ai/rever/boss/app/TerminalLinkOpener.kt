@@ -13,6 +13,7 @@ import ai.rever.boss.platform.openFileWithSystemDefault
 import ai.rever.boss.plugin.events.FileValidationResult
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.project.DefaultWorkingDirectory
+import ai.rever.boss.run.RunnerSettingsManager
 import ai.rever.boss.terminal.ExistingSplitTargetMode
 import ai.rever.boss.terminal.TerminalLinkOpenMode
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
@@ -67,7 +68,7 @@ internal fun openRunnerInMainPanel(
 
     if (activeComponent != null) {
         val tabIndex = activeComponent.addTab(terminalTab)
-        if (tabIndex >= 0) {
+        if (tabIndex >= 0 && RunnerSettingsManager.currentSettings.value.focusOnRun) {
             activeComponent.selectTab(tabIndex)
         }
     }

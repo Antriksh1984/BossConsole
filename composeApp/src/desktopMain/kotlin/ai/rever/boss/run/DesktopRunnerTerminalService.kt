@@ -1,5 +1,6 @@
 package ai.rever.boss.run
 
+import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.events.RunnerTerminalEventBus
 import ai.rever.boss.plugin.api.SIDEBAR_TERMINAL_ID
 import ai.rever.boss.plugin.run.Language
@@ -10,6 +11,7 @@ import ai.rever.boss.window.WindowRunnerStateRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -268,8 +270,9 @@ actual object RunnerTerminalService {
     ): String {
         logger.debug(LogCategory.TERMINAL, "Re-running config", mapOf("configName" to config.name))
 
+        val settings = RunnerSettingsManager.currentSettings.value
         // Check if using sidebar mode - Ctrl+C will be handled by openInSidebarTerminal
-        val usesSidebar = RunnerSettingsManager.currentSettings.value.terminalTarget == RunnerTerminalTarget.SIDEBAR_PANEL
+        val usesSidebar = settings.terminalTarget == RunnerTerminalTarget.SIDEBAR_PANEL
 
         // Build command outside lock
         val command = buildFullCommand(config)
@@ -304,6 +307,9 @@ actual object RunnerTerminalService {
                 val sent = TerminalAPIAccess.sendInterrupt(existingWindowId, existingTerminalId)
                 if (sent) {
                     logger.debug(LogCategory.TERMINAL, "Sent Ctrl+C to stop existing process", mapOf("windowId" to existingWindowId))
+                    // Give the shell time to handle the interrupt and show its prompt
+                    // before the tab it belongs to is torn down underneath it.
+                    delay(settings.rerunDelayMs)
                 }
                 // Close the terminal tab (in the window where it exists)
                 RunnerTerminalEventBus.closeRunnerTerminal(existingTerminalId, sourceWindowId = existingWindowId)
@@ -334,18 +340,34 @@ actual object RunnerTerminalService {
      * Also cleans up all mappings to prevent memory leaks.
      */
     actual fun markTerminalStopped(terminalId: String) {
-        stateLock.withLock {
-            val configIds = terminalToConfigs.remove(terminalId)?.toSet() ?: emptySet()
-            if (configIds.isNotEmpty()) {
-                // Clean up forward mapping
-                _configToTerminal.update { current ->
-                    current.filterKeys { it !in configIds }
+        val configIds =
+            stateLock.withLock {
+                val ids = terminalToConfigs.remove(terminalId)?.toSet() ?: emptySet()
+                if (ids.isNotEmpty()) {
+                    // Clean up forward mapping
+                    _configToTerminal.update { current ->
+                        current.filterKeys { it !in ids }
+                    }
+                    _runningConfigs.update { it - ids }
+                    // Clean up window mapping
+                    ids.forEach { removeAllWindowsFromConfig(it) }
+                    logger.debug(
+                        LogCategory.TERMINAL,
+                        "Terminal stopped",
+                        mapOf("terminalId" to terminalId, "configs" to ids.toString()),
+                    )
                 }
-                _runningConfigs.update { it - configIds }
-                // Clean up window mapping
-                configIds.forEach { removeAllWindowsFromConfig(it) }
-                logger.debug(LogCategory.TERMINAL, "Terminal stopped", mapOf("terminalId" to terminalId, "configs" to configIds.toString()))
+                ids
             }
+
+        if (configIds.isNotEmpty() && RunnerSettingsManager.currentSettings.value.notifyOnExit) {
+            val names =
+                configIds.map { id ->
+                    RunConfigurationManager.currentSettings.value.configurations
+                        .find { it.id == id }
+                        ?.name ?: id
+                }
+            StatusMessageManager.showMessage("${names.joinToString(", ")} finished")
         }
     }
 
