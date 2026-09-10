@@ -232,16 +232,24 @@ Deliberately out of scope, so nobody assumes more than exists:
   `loadPlugin` refuses outright and `DefaultPlugin` skips on scan, so it looks missing to every
   manifest naming it) and the api plugin (whose install is an unload-all / swap / reload-all hot
   swap, not something to start from a dialog about something else).
-- **Window routing is best-effort and still needs queue-level repair.** Prompts can carry a
-  preferred window id; non-target collectors re-report before delaying their next receive.
-  Returning before suspension prevents cancellation during that delay from abandoning a prompt.
-  Report-time focus can differ from the initiating window, null targets remain unscoped, and
-  re-reporting still risks overflow, duplicate replacement and unbounded hops while a target is
-  busy. Do not treat this as guaranteed delivery to the initiating window or manager.
-- **The bus filters at report time, not only in the collector.** A prompt the collector is
-  certain to discard - declined, or a duplicate of one already waiting - still costs one of four
-  buffer slots on the way through, and that can be what refuses a different dependency which
-  could have been shown.
+- **Window routing is best-effort, not guaranteed delivery to the initiating window or manager.**
+  A prompt can carry a preferred window id (`MissingDependencyPrompt.windowId`, resolved from
+  focus at report time - it can differ from the window whose install actually found the missing
+  dependency, and a null target is unscoped by design). Delivery itself is a claim registry, not
+  a channel: `PluginDependencyBus.missingDependencies` broadcasts every pending prompt to every
+  open window each time anything changes (or once a second, as a fallback for the one case
+  nothing else wakes a collector for - the preferred window closing with no new report to
+  trigger a rescan), and each window decides independently, via `shouldClaimMissingDependencyPrompt`,
+  whether to `claim()` it. A non-target window that isn't the right audience simply leaves the
+  prompt where it is; there is no reoffer, no retry loop, and no per-rejection wait. When the
+  preferred window has closed, any other window may claim the prompt instead - and its installer
+  re-resolves to any still-live `DynamicPluginManager` at use time (`MissingDependencyReporter.installerFor`),
+  not the one that reported it, since that one's manager is disposed along with the window.
+- **The bus filters at report time, not only in the collector.** A prompt already declined this
+  session is dropped before it is ever admitted; a duplicate report for a key still pending keeps
+  the first reporter's prompt (and its `windowId`) rather than being replaced by the second. There
+  is no buffer to overflow - `pending` is a map with no capacity ceiling - so this is about not
+  re-asking a question already answered, not about conserving a scarce slot.
 - **A declined prompt is remembered for the session, not persisted, and keyed by kind.** "Not
   now" on an *optional* dependency is one answer about that plugin - three consumers declare the
   gateway optional, and being asked three times for one answer is what this prevents. "Skip" on a

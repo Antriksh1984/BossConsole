@@ -3,6 +3,7 @@ package ai.rever.boss.components.plugin
 import ai.rever.boss.plugin.api.PluginDependency
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
@@ -579,8 +580,20 @@ open class PluginDependencyBus {
      * a report() still gets a signal to run its first scan, rather than waiting for a change
      * that already happened; [tryEmit] never suspends, so [report] - called from an install
      * path with no UI to wait on - never blocks on this either.
+     *
+     * `extraBufferCapacity = 1` with `DROP_OLDEST` is load-bearing, not decoration: with no
+     * extra buffer, [tryEmit] returns false - and [report] discards that boolean - whenever a
+     * collector has not yet consumed the replayed value, which is precisely whenever any window
+     * is mid-dialog or mid-[snapshotFlow] check. That is the common case for a *second* missing
+     * dependency, not a rare one, so without this the wake was routinely lost and [ticker] (a 1s
+     * poll) was doing the real work its own KDoc says is only the fallback for a closed target
+     * window. Nothing is lost either way, since [pending] still holds the prompt - this just
+     * makes the signal itself reliable instead of best-effort, so a rescan happens as soon as a
+     * collector is free rather than up to a second later. Conflating repeated "go look" signals
+     * into one is exactly right for a rescan trigger, which is why DROP_OLDEST and not SUSPEND.
      */
-    private val changed = MutableSharedFlow<Unit>(replay = 1)
+    private val changed =
+        MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     /**
      * A snapshot of [pending] at this instant, oldest first. Never returns the live map: a
@@ -662,8 +675,13 @@ open class PluginDependencyBus {
         }
 }
 
-/** How often [PluginDependencyBus.missingDependencies] re-broadcasts with no new report. */
-private const val MISSING_DEPENDENCY_RESCAN_INTERVAL_MS = 1000L
+/**
+ * How often [PluginDependencyBus.missingDependencies] re-broadcasts with no new report.
+ *
+ * `internal`, not `private` - this repo pins its timing constants against a test
+ * (`SWIPE_NAV_DEBOUNCE_MS`, `GESTURE_GAP_MS`), and this one was neither pinned nor testable.
+ */
+internal const val MISSING_DEPENDENCY_RESCAN_INTERVAL_MS = 1000L
 
 /**
  * Whether a prompt that reached a window should be put on screen.

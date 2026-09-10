@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.loader.ApiClassLoader
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -611,8 +612,13 @@ class PluginDependencyBusTest {
         }
 
     @Test
-    fun `claim is atomic - exactly one of two simultaneous callers wins the same prompt`() =
+    fun `a claimed prompt cannot be claimed a second time`() =
         runTest {
+            // Not a concurrency test - runTest serialises both async bodies one after the other,
+            // so `synchronized(lock)` in claim() is never actually exercised in parallel here.
+            // What this pins is the outcome that has to hold regardless: once a prompt is gone
+            // from `pending`, a second claim of the same prompt object reports false rather than
+            // claiming it again.
             val bus = PluginDependencyBus()
             val target = prompt("com.example.race")
             bus.report(target)
@@ -785,6 +791,28 @@ class PluginDependencyBusTest {
                     .first()
                     .missing.missingPluginId,
             )
+        }
+
+    @Test
+    fun `an unclaimed prompt is re-broadcast on the periodic rescan, with no new report`() =
+        runTest {
+            // The whole point of the ticker: the case nothing else wakes a collector for is the
+            // prompt's preferred window closing with no new report to trigger a rescan. Modelled
+            // here without claiming, the same way a wrong-window collector leaves a prompt alone.
+            val bus = PluginDependencyBus()
+            bus.report(prompt("com.example.rescan"))
+
+            val emissions = mutableListOf<MissingDependencyPrompt>()
+            val collector = launch { bus.missingDependencies.collect { emissions += it } }
+            runCurrent()
+            assertEquals(1, emissions.size, "the report's own broadcast")
+
+            advanceTimeBy(MISSING_DEPENDENCY_RESCAN_INTERVAL_MS)
+            runCurrent()
+            assertEquals(2, emissions.size, "the ticker's rescan, with no new report in between")
+            assertEquals("com.example.rescan", emissions.last().missing.missingPluginId)
+
+            collector.cancel()
         }
 }
 
@@ -965,12 +993,13 @@ class PluginDependentsTest {
 /**
  * Which window should show a missing-dependency prompt, in a multi-window session.
  *
- * `PluginDependencyBus` delivers over a `Channel`: exactly one collector receives each prompt,
- * but not necessarily the window whose install raised it (see `PluginDependencyBusTest` above
- * for that delivery guarantee itself, which this does not change). `shouldClaimMissingDependencyPrompt`
- * is the decision a wrongly-chosen collector uses to hand the prompt back instead of showing it -
- * kept pure and tested here the same way `shouldShowMissingDependency` is, without needing a real
- * `WindowFocusManager` or a second window.
+ * `PluginDependencyBus` broadcasts every pending prompt to every open window, but only one may
+ * act on it - `claim()` is what makes that exactly-once (see `PluginDependencyBusTest` above for
+ * that guarantee itself, which this does not change), not necessarily the window whose install
+ * raised it. `shouldClaimMissingDependencyPrompt` is the decision a wrongly-chosen collector uses
+ * to leave the prompt alone instead of claiming and showing it - kept pure and tested here the
+ * same way `shouldShowMissingDependency` is, without needing a real `WindowFocusManager` or a
+ * second window.
  */
 class MissingDependencyPromptRoutingTest {
     private val noopInstaller =

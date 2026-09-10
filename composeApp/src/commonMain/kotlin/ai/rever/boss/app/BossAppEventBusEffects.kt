@@ -248,16 +248,20 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                 if (!shouldClaim) {
                     return@collect
                 }
-                // Take ownership before acting on it: another window's collector may have been
-                // woken by the same broadcast and reached this same decision concurrently, and
-                // only one of us may proceed. A losing claim means someone else already has it.
-                if (!PluginDependencyEventBus.claim(prompt)) {
-                    return@collect
-                }
                 // Re-check rather than trusting the report: two dependents of one missing
                 // plugin each raise a prompt, so installing for the first satisfies the
                 // second, whose dialog would otherwise claim something untrue and reinstall
                 // what is already loaded. Off the UI thread because the check stats the jar.
+                //
+                // Deliberately BEFORE claim(), not after: claiming here and then suspending on
+                // this IO stat left a real cancellation hole (window closing, or this effect
+                // restarting, during the stat) that permanently lost an already-claimed prompt -
+                // it was off the bus with nowhere else recorded. Checking first means the only
+                // thing lost to a cancellation here is the redundant work, since the prompt is
+                // still sitting in `pending` for any other window's collector (or the ticker) to
+                // pick up. The cost is that two windows can both run this same stat concurrently
+                // in the rare case they are both deciding on one prompt at once - a duplicated
+                // read, not a lost one.
                 val present =
                     withContext(Dispatchers.IO) {
                         prompt.installer.isInstalled(prompt.missing.missingPluginId)
@@ -273,6 +277,17 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                         declined = PluginDependencyEventBus.wasDeclined(prompt.missing),
                     )
                 if (!show) {
+                    return@collect
+                }
+                // Take ownership immediately before acting on it, not before: another window's
+                // collector may have been woken by the same broadcast and reached this same
+                // decision concurrently, and only one of us may proceed. A losing claim means
+                // someone else already has it - which the check above being redundant work for
+                // this window is the entire cost of, now that it runs before rather than after.
+                // Nothing between here and the state assignment below suspends, so this is the
+                // only remaining strand a cancellation could land on (the documented, accepted
+                // dialog-open gap noted just below).
+                if (!PluginDependencyEventBus.claim(prompt)) {
                     return@collect
                 }
                 // Reset here rather than relying on the previous dialog's exit path having
