@@ -5,6 +5,7 @@ import ai.rever.boss.components.bars.getBarScrollbarConfig
 import ai.rever.boss.components.bars.horizontalScrollWithScrollbar
 import ai.rever.boss.components.bars.rememberBarContextMenuItems
 import ai.rever.boss.components.buttons.BossActionButton
+import ai.rever.boss.components.dialogs.McpPolicyManagerDialog
 import ai.rever.boss.components.events.PanelEventBus
 import ai.rever.boss.components.overlays.contextMenu
 import ai.rever.boss.components.plugin.registries.StatusBarRegistryImpl
@@ -230,6 +231,27 @@ fun BossRightBottomBar() {
         androidx.compose.material.TextButton(onClick = { McpToolRegistryImpl.policyEngine.clearSessionTrusts() }) {
             Text("Revoke MCP session trust (${trustedTools.size})", color = BossTheme.colors.alert)
         }
+    }
+
+    // Inspection/revocation for a rule saved via the approval dialog's "Always Allow"/"Always
+    // Deny" - the gap AGENTS.md's governance section names as reachable only by hand-editing
+    // ~/.boss/mcp-tool-policy.json and restarting.
+    val persistedPolicyConfig by McpToolRegistryImpl.policyEngine.config.collectAsState()
+    var showPolicyManager by remember { mutableStateOf(false) }
+    if (persistedPolicyConfig.rules.isNotEmpty()) {
+        androidx.compose.material.TextButton(onClick = { showPolicyManager = true }) {
+            Text(
+                "Persisted MCP policies (${persistedPolicyConfig.rules.size})",
+                color = BossTheme.colors.textSecondary,
+            )
+        }
+    }
+    if (showPolicyManager) {
+        McpPolicyManagerDialog(
+            rules = persistedPolicyConfig.rules,
+            onRevoke = { toolName -> McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName) },
+            onDismiss = { showPolicyManager = false },
+        )
     }
 
     val policyFault by McpToolRegistryImpl.policyFault.collectAsState()

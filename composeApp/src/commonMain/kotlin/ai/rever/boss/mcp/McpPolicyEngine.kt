@@ -159,6 +159,28 @@ class McpPolicyEngine(
             }
         }
 
+    /**
+     * The operator-facing undo for [setToolPolicy]'s persistent scope: returns [toolName] to
+     * ASK, so the next mutating call prompts again rather than silently reusing a stale ALLOW
+     * or DENY someone saved earlier and no longer means.
+     *
+     * Clears session trust for the same tool too, not only the persisted rule. [policyFor]
+     * checks session trust *before* a non-DENY configured rule, so a tool that happens to hold
+     * both (session-trusted, then separately given a persistent rule) would otherwise keep
+     * answering ALLOW from the session-trust check alone even after its persisted rule was
+     * reset - "revoke" has to mean the call asks again, not "asks again unless it also had the
+     * other kind of standing grant."
+     *
+     * Returns whether the persisted half succeeded, via the same disk-write path
+     * [setToolPolicy] uses - a caller surfaces `false` as a real failure, not a silent no-op,
+     * since a revoke that did not actually take effect on disk is worse than useless: the UI
+     * would show the tool as reset while the file, and the next restart, still say otherwise.
+     */
+    fun revokePersistedPolicy(toolName: String): Boolean {
+        revokeSessionTrust(toolName)
+        return setToolPolicy(toolName, McpPolicyAction.ASK)
+    }
+
     // An absent file uses defaults; I/O and JSON failures withhold tools.
     @Suppress("ReturnCount", "TooGenericExceptionCaught")
     private fun loadConfig(): McpToolPolicyConfig {
