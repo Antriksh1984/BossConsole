@@ -113,14 +113,49 @@ object WebsiteMatchingUtil {
     }
 
     /**
+     * Public-suffix-ish labels that must not, by themselves, count as a shared token
+     * between two domains in [calculateMatchScore]'s partial-match fallback.
+     *
+     * Not a full public suffix list (see the Mozilla PSL for that) - just the labels
+     * this codebase's own [extractMainDomain] already treats as TLDs, plus the other
+     * common single-label TLDs likely to appear in saved secret websites. Good enough
+     * to close BossConsole#460's "every .com secret matches every .com site" case
+     * without taking on a PSL dependency for a threshold this coarse to begin with.
+     */
+    private val COMMON_TLD_LABELS =
+        setOf(
+            "com",
+            "org",
+            "net",
+            "edu",
+            "gov",
+            "mil",
+            "int",
+            "io",
+            "co",
+            "app",
+            "dev",
+            "me",
+            "info",
+            "biz",
+            "xyz",
+            // the second labels of the two-part TLDs extractMainDomain special-cases
+            "uk",
+            "au",
+            "in",
+            "jp",
+            "br",
+            "za",
+        )
+
+    /**
      * Match secrets for a specific domain with scoring.
      *
      * Returns secrets sorted by relevance (highest score first).
      * Matching logic:
      * - Exact match (google.com == google.com): score 1.0
      * - Subdomain match (login.google.com vs google.com): score 0.9
-     * - Domain contains (google.com contains "google"): score 0.7
-     * - Partial match ("google" in "google-workspace.com"): score 0.5
+     * - Partial match, sharing a non-TLD label ("google" in "google-workspace.com"): score 0.5
      *
      * @param domain Current website domain (e.g., "google.com")
      * @param secrets List of all available secrets
@@ -178,15 +213,12 @@ object WebsiteMatchingUtil {
                 MatchScore(0.9f, "subdomain")
             }
 
-            // Domain contains other (google.com contains google)
-            secretNorm.contains(domainNorm) || domainNorm.contains(secretNorm) -> {
-                MatchScore(0.7f, "domain")
-            }
-
-            // Partial match (same keywords)
+            // Partial match: a shared label that is NOT itself a bare TLD/public-suffix
+            // segment. Without excluding those, every ".com" secret shares the label
+            // "com" with every ".com" site and scores as a match (BossConsole#460).
             else -> {
-                val secretParts = secretNorm.split(".", "-", "_")
-                val domainParts = domainNorm.split(".", "-", "_")
+                val secretParts = secretNorm.split(".", "-", "_").filterNot { it in COMMON_TLD_LABELS }
+                val domainParts = domainNorm.split(".", "-", "_").filterNot { it in COMMON_TLD_LABELS }
                 val commonParts = secretParts.intersect(domainParts.toSet())
 
                 if (commonParts.isNotEmpty()) {
@@ -265,7 +297,9 @@ object WebsiteMatchingUtil {
                 // Generic formatting: example-site → Example Site
                 nameWithoutTld
                     .split("-", "_")
-                    .joinToString(" ") { it.replaceFirstChar { c -> if (c.isLowerCase()) c.titlecase() else it } }
+                    .joinToString(" ") {
+                        it.replaceFirstChar { c -> if (c.isLowerCase()) c.titlecase() else c.toString() }
+                    }
             }
         }
     }
