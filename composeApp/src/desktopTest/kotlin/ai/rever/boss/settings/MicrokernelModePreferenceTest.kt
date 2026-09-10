@@ -1,11 +1,15 @@
 package ai.rever.boss.settings
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import java.io.File
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -42,6 +46,7 @@ class MicrokernelModePreferenceTest {
     fun cleanup() {
         tempFiles.forEach { it.parentFile?.deleteRecursively() }
         tempFiles.clear()
+        MicrokernelModePreference.forgetStartupSnapshotForTest()
     }
 
     @Test
@@ -165,20 +170,25 @@ class MicrokernelModePreferenceTest {
             assertEquals("Microkernel Mode", microkernelModeMenuLabel(state.value))
         }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `two independent collectors of saveState converge on the same value`() =
+    fun `two active collectors receive successful saves and failures`() =
         runTest {
-            // Unlike the test above (which reads one flow reference twice, a weaker property),
-            // this simulates Settings and the menu as two genuinely separate collect sites.
-            var settingsSeen: MicrokernelModeSaveState? = null
-            var menuSeen: MicrokernelModeSaveState? = null
-
+            val settingsSeen = mutableListOf<MicrokernelModeSaveState>()
+            val menuSeen = mutableListOf<MicrokernelModeSaveState>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                MicrokernelModePreference.saveState.collect { settingsSeen.add(it) }
+            }
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                MicrokernelModePreference.saveState.collect { menuSeen.add(it) }
+            }
             MicrokernelModePreference.saveAndPublish(true) { Result.success(Unit) }
-            settingsSeen = MicrokernelModePreference.saveState.value
-            menuSeen = MicrokernelModePreference.saveState.value
-
+            MicrokernelModePreference.saveAndPublish(false) { Result.failure(java.io.IOException("blocked")) }
             assertEquals(settingsSeen, menuSeen)
-            assertEquals(true, settingsSeen.enabled)
+            assertEquals(3, settingsSeen.size)
+            assertEquals(true, settingsSeen[1].enabled)
+            assertEquals(true, settingsSeen.last().enabled)
+            assertTrue(settingsSeen.last().saveFailed)
         }
 
     @Test
@@ -265,4 +275,56 @@ class MicrokernelModePreferenceTest {
         assertFalse(consent.pending)
         assertEquals(1, writes)
     }
+
+    @Test
+    fun `failed atomic publication preserves original bytes and removes temporary file`() {
+        val file = tempEnvFile()
+        file.writeText("OTHER=preserved\nBOSS_MODE=KERNEL\n")
+        val before = file.readBytes().toList()
+        assertFailsWith<java.io.IOException> {
+            writeModeFile(file, "replacement") { source, _ ->
+                assertEquals("replacement", source.toFile().readText())
+                throw java.io.IOException("simulated move failure")
+            }
+        }
+        assertEquals(before, file.readBytes().toList())
+        assertEquals(listOf("env_vars"), file.parentFile.list()!!.toList())
+    }
+
+    @Test
+    fun `atomic publication preserves existing posix access permissions`() {
+        val file = tempEnvFile()
+        file.writeText("OTHER=preserved\n")
+        val path = file.toPath()
+        if (java.nio.file.Files
+                .getFileAttributeView(path, java.nio.file.attribute.PosixFileAttributeView::class.java) == null
+        ) {
+            return
+        }
+        val permissions =
+            java.nio.file.attribute.PosixFilePermissions
+                .fromString("rw-------")
+        java.nio.file.Files
+            .setPosixFilePermissions(path, permissions)
+        writeModeFile(file, "OTHER=preserved\nBOSS_MODE=KERNEL\n")
+        assertEquals(
+            permissions,
+            java.nio.file.Files
+                .getPosixFilePermissions(path),
+        )
+    }
+
+    @Test
+    fun `a failed refresh preserves the saved value and keeps the error visible`() =
+        runTest {
+            val file = tempEnvFile()
+            MicrokernelModePreference.setEnabled(true, file)
+            MicrokernelModePreference.refresh(file)
+            file.delete()
+            file.mkdir()
+            MicrokernelModePreference.refresh(file)
+            assertEquals(true, MicrokernelModePreference.saveState.value.enabled)
+            assertEquals(true, MicrokernelModePreference.saveState.value.startupEnabled)
+            assertTrue(MicrokernelModePreference.saveState.value.saveFailed)
+        }
 }

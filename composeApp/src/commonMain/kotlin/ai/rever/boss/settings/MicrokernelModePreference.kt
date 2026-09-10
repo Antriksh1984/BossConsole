@@ -1,7 +1,6 @@
 package ai.rever.boss.settings
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
-import ai.rever.boss.utils.atomicWriteText
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,6 +13,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFileAttributeView
 
 /**
  * The confirmation dialog's body text, shared by both entry points so Settings and the
@@ -56,7 +59,13 @@ object MicrokernelModePreference {
      */
     suspend fun refresh(envFile: File = BossDirectories.resolve("env_vars")) =
         mutex.withLock {
-            val current = isEnabled(envFile)
+            val current =
+                try {
+                    withContext(Dispatchers.IO) { readEnabled(envFile) }
+                } catch (_: IOException) {
+                    _saveState.value = _saveState.value.copy(saveFailed = true)
+                    return@withLock
+                }
             if (startupEnabledLatched == null) {
                 startupEnabledLatched = current
             }
@@ -110,19 +119,23 @@ object MicrokernelModePreference {
      */
     suspend fun isEnabled(envFile: File = BossDirectories.resolve("env_vars")): Boolean =
         withContext(Dispatchers.IO) {
-            if (!envFile.exists()) return@withContext false
             try {
-                envFile
-                    .readLines(Charsets.UTF_8)
-                    .filter { it.isNotBlank() && !it.startsWith("#") }
-                    .mapNotNull { line ->
-                        val parts = line.split("=", limit = 2)
-                        if (parts.size == 2 && parts[0].trim() == "BOSS_MODE") parts[1].trim() else null
-                    }.lastOrNull() == "KERNEL"
+                readEnabled(envFile)
             } catch (_: IOException) {
                 false
             }
         }
+
+    private fun readEnabled(envFile: File): Boolean {
+        if (!envFile.exists()) return false
+        return envFile
+            .readLines(Charsets.UTF_8)
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .mapNotNull { line ->
+                val parts = line.split("=", limit = 2)
+                if (parts.size == 2 && parts[0].trim() == "BOSS_MODE") parts[1].trim() else null
+            }.lastOrNull() == "KERNEL"
+    }
 
     /**
      * Persists [enabled] to `env_vars`, returning whether the write actually succeeded.
@@ -142,7 +155,8 @@ object MicrokernelModePreference {
                 envFile.parentFile?.mkdirs()
 
                 if (!envFile.exists()) {
-                    envFile.atomicWriteText(
+                    writeModeFile(
+                        envFile,
                         if (enabled) "BOSS_MODE=KERNEL\n" else "# BOSS_MODE=KERNEL\n",
                     )
                     return@withContext Result.success(Unit)
@@ -174,7 +188,7 @@ object MicrokernelModePreference {
                 // sibling temp file and move it into place instead, the same pattern this repo
                 // already uses for exactly this hazard (StoreMissingDependencyInstaller's
                 // `.jar.part`).
-                envFile.atomicWriteText(lines.joinToString("\n") + "\n")
+                writeModeFile(envFile, lines.joinToString("\n") + "\n")
                 Result.success(Unit)
             } catch (e: IOException) {
                 Result.failure(e)
@@ -202,7 +216,7 @@ internal data class MicrokernelModeSaveState(
     val saveFailed: Boolean = false,
     // What env_vars said the FIRST time this process read it - see the KDoc on
     // MicrokernelModePreference.startupEnabledLatched for why this, and not a live
-    // ConfigLoader read, is the correct "what is actually running" comparand.
+    // ConfigLoader read, is the saved-preference comparand. Runtime mode activation is tracked separately in #391.
     val startupEnabled: Boolean? = null,
 ) {
     val needsRestart: Boolean
@@ -233,5 +247,27 @@ internal class MicrokernelModeConfirmation {
         if (!pending) return
         pending = false
         save()
+    }
+}
+
+/** Preserve an existing config file's permissions and require atomic publication. */
+internal fun writeModeFile(
+    file: File,
+    text: String,
+    move: (Path, Path) -> Unit = { source, target ->
+        Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    },
+) {
+    val target = file.canonicalFile.toPath()
+    if (Files.exists(target) && !Files.isWritable(target)) throw IOException("Mode file is not writable")
+    val temporary = Files.createTempFile(target.parent, "env_vars-", ".tmp")
+    try {
+        if (Files.exists(target) && Files.getFileAttributeView(target, PosixFileAttributeView::class.java) != null) {
+            Files.setPosixFilePermissions(temporary, Files.getPosixFilePermissions(target))
+        }
+        Files.writeString(temporary, text, Charsets.UTF_8)
+        move(temporary, target)
+    } finally {
+        Files.deleteIfExists(temporary)
     }
 }
