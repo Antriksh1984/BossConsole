@@ -96,8 +96,9 @@ class PluginClassLoader(
         }
 
         /**
-         * Whether any known plugin classloader still has [path] open - state `ACTIVE` or
-         * `UNLOAD_IN_PROGRESS`, i.e. [close] has not finished releasing resources (BossConsole#72).
+         * Whether any known plugin classloader for [path] is ACTIVE or UNLOAD_IN_PROGRESS.
+         * The latter includes resource closure (BossConsole#72). A throwing close still publishes
+         * UNLOADED, so this predicate does not guarantee that every OS handle was released.
          * The registry is weak: collectible loaders are not retained by this guard. Canonical-path
          * failures also return false; this is a best-effort check, not a filesystem lock.
          *
@@ -276,9 +277,11 @@ class PluginClassLoader(
     /**
      * Mark this classloader as being unloaded.
      *
-     * New child-first misses stop delegating to the parent. Own-jar and shared-class loads
-     * still work during teardown. A parent lookup admitted while ACTIVE can finish after
-     * this marker; the per-name class-loading locks are not an unload/drain barrier.
+     * New child-first misses stop delegating to the parent. Own-JAR lookup remains permitted
+     * but can succeed only while its resources remain open; close() uses this state too.
+     * Shared-class lookup remains available. A parent lookup admitted while ACTIVE can finish
+     * after this marker; per-name class-loading locks are not an unload/drain barrier.
+     * See loadClassChildFirst for why parent fallback stays refused during resource closure.
      */
     fun markUnloading() {
         if (_state.compareAndSet(ClassLoaderState.ACTIVE, ClassLoaderState.UNLOAD_IN_PROGRESS)) {
