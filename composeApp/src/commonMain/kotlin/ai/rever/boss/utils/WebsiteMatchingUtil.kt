@@ -24,7 +24,7 @@ object WebsiteMatchingUtil {
     data class MatchedSecret(
         val secret: SecretEntry,
         val matchScore: Float, // 0.0 - 1.0
-        val matchReason: String, // "exact", "subdomain", "partial", "domain"
+        val matchReason: String, // "exact", "subdomain"
     ) : Comparable<MatchedSecret> {
         override fun compareTo(other: MatchedSecret): Int {
             return other.matchScore.compareTo(this.matchScore) // Descending
@@ -113,49 +113,23 @@ object WebsiteMatchingUtil {
     }
 
     /**
-     * Public-suffix-ish labels that must not, by themselves, count as a shared token
-     * between two domains in [calculateMatchScore]'s partial-match fallback.
-     *
-     * Not a full public suffix list (see the Mozilla PSL for that) - just the labels
-     * this codebase's own [extractMainDomain] already treats as TLDs, plus the other
-     * common single-label TLDs likely to appear in saved secret websites. Good enough
-     * to close BossConsole#460's "every .com secret matches every .com site" case
-     * without taking on a PSL dependency for a threshold this coarse to begin with.
-     */
-    private val COMMON_TLD_LABELS =
-        setOf(
-            "com",
-            "org",
-            "net",
-            "edu",
-            "gov",
-            "mil",
-            "int",
-            "io",
-            "co",
-            "app",
-            "dev",
-            "me",
-            "info",
-            "biz",
-            "xyz",
-            // the second labels of the two-part TLDs extractMainDomain special-cases
-            "uk",
-            "au",
-            "in",
-            "jp",
-            "br",
-            "za",
-        )
-
-    /**
      * Match secrets for a specific domain with scoring.
      *
      * Returns secrets sorted by relevance (highest score first).
      * Matching logic:
      * - Exact match (google.com == google.com): score 1.0
      * - Subdomain match (login.google.com vs google.com): score 0.9
-     * - Partial match, sharing a non-TLD label ("google" in "google-workspace.com"): score 0.5
+     *
+     * Deliberately just these two. A credential surface should favor precision over recall:
+     * exact-plus-subdomain is what a password manager keys on, covers every legitimate case,
+     * and cannot put a secret in front of a domain the user is not actually on. An earlier
+     * token-overlap "partial" tier (matching on any shared word after splitting on `.`/`-`/`_`)
+     * was removed for exactly that reason - filtering bare TLD labels ("com", "org", ...) out
+     * of the comparison closed the "every .com secret matches every .com site" case
+     * (BossConsole#460), but the tier still matched two different registrable domains that
+     * merely share a brand-ish label (`apple.com` vs `apple.org`, `google.com` vs
+     * `google-workspace.com`) - the same wrong-site-credential problem, just narrower. See
+     * [WebsiteMatchingUtilTest] for the cross-domain cases this is required not to match.
      *
      * @param domain Current website domain (e.g., "google.com")
      * @param secrets List of all available secrets
@@ -203,29 +177,26 @@ object WebsiteMatchingUtil {
         val domainNorm = currentDomain.lowercase().trim()
 
         return when {
+            // Without this, two blank sides (e.g. a secret with no recorded website, or a
+            // domain extraction failure that fell through to an empty string) would satisfy
+            // the exact-match check below vacuously: "" == "".
+            secretNorm.isEmpty() || domainNorm.isEmpty() -> {
+                MatchScore(0.0f, "no_match")
+            }
+
             // Exact match
             secretNorm == domainNorm -> {
                 MatchScore(1.0f, "exact")
             }
 
-            // Subdomain match (login.google.com vs google.com)
+            // Subdomain match (login.google.com vs google.com) - a real subdomain boundary,
+            // never a bare substring: "snapple.com".endsWith(".apple.com") is false.
             secretNorm.endsWith(".$domainNorm") || domainNorm.endsWith(".$secretNorm") -> {
                 MatchScore(0.9f, "subdomain")
             }
 
-            // Partial match: a shared label that is NOT itself a bare TLD/public-suffix
-            // segment. Without excluding those, every ".com" secret shares the label
-            // "com" with every ".com" site and scores as a match (BossConsole#460).
             else -> {
-                val secretParts = secretNorm.split(".", "-", "_").filterNot { it in COMMON_TLD_LABELS }
-                val domainParts = domainNorm.split(".", "-", "_").filterNot { it in COMMON_TLD_LABELS }
-                val commonParts = secretParts.intersect(domainParts.toSet())
-
-                if (commonParts.isNotEmpty()) {
-                    MatchScore(0.5f, "partial")
-                } else {
-                    MatchScore(0.0f, "no_match")
-                }
+                MatchScore(0.0f, "no_match")
             }
         }
     }
