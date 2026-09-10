@@ -7,6 +7,8 @@ import ai.rever.boss.components.settings.shared.SettingsTheme.BorderColor
 import ai.rever.boss.components.settings.shared.SettingsTheme.TextPrimary
 import ai.rever.boss.components.settings.shared.SettingsTheme.TextSecondary
 import ai.rever.boss.components.settings.shared.SettingsToggle
+import ai.rever.boss.plugin.run.MAX_RERUN_DELAY_MS
+import ai.rever.boss.plugin.run.MIN_RERUN_DELAY_MS
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.run.RunnerSettingsManager
 import ai.rever.boss.run.RunnerTerminalTarget
@@ -78,7 +80,7 @@ fun RunnerSettings() {
                         RunnerSettingsManager.setFocusOnRun(enabled)
                     }
                 },
-                description = "Automatically focus the terminal when a runner starts",
+                description = "Not yet supported - saved for a future release, has no effect today",
             )
 
             SettingsToggle(
@@ -89,7 +91,7 @@ fun RunnerSettings() {
                         RunnerSettingsManager.setNotifyOnExit(enabled)
                     }
                 },
-                description = "Show a notification when a runner process completes",
+                description = "Not yet supported - saved for a future release, has no effect today",
             )
 
             SettingsSlider(
@@ -101,10 +103,10 @@ fun RunnerSettings() {
                         RunnerSettingsManager.setRerunDelayMs(rerunDelay.toLong())
                     }
                 },
-                valueRange = 0f..2000f,
+                valueRange = MIN_RERUN_DELAY_MS.toFloat()..MAX_RERUN_DELAY_MS.toFloat(),
                 steps = 19,
                 valueDisplay = { "${it.toInt()} ms" },
-                description = "Delay between Ctrl+C and new command (for sidebar terminal)",
+                description = "Delay between Ctrl+C and the new command when re-running in the main panel",
             )
         }
 

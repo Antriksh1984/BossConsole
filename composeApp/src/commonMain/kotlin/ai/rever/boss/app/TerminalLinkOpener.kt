@@ -13,7 +13,6 @@ import ai.rever.boss.platform.openFileWithSystemDefault
 import ai.rever.boss.plugin.events.FileValidationResult
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.project.DefaultWorkingDirectory
-import ai.rever.boss.run.RunnerSettingsManager
 import ai.rever.boss.terminal.ExistingSplitTargetMode
 import ai.rever.boss.terminal.TerminalLinkOpenMode
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
@@ -67,10 +66,18 @@ internal fun openRunnerInMainPanel(
             ?: splitViewState.getAllPanels().firstOrNull()?.tabsComponent
 
     if (activeComponent != null) {
-        // A selectTab call right after addTab used to be a no-op: TabsNavigation.addTab always
-        // made the new tab active regardless, so turning focusOnRun off never actually left the
-        // previously active tab in place. activate= is what addTab itself now honors.
-        activeComponent.addTab(terminalTab, activate = RunnerSettingsManager.currentSettings.value.focusOnRun)
+        // Always activate, regardless of focusOnRun (BossConsole#486 review). addTab now honors
+        // activate=false correctly at this layer - TabsNavigation.addTab leaves the previously
+        // active tab in place instead of always jumping to the new one - but the terminal-tab
+        // plugin creates its PTY session lazily, from Content() composition, and
+        // BossMainPanelContent composes only the active tab. Passing focusOnRun through here
+        // would not "start the run without stealing focus"; it would mean the run never starts
+        // at all until the user clicks the tab - the opposite of the setting's promise, and for
+        // a re-run (which first removes the old, running tab) it means silently killing a
+        // running process and replacing it with one that never starts. Revisit once terminal-tab
+        // can start a session independent of being composed; the activate parameter itself is
+        // sound and tested (TabsNavigationTest, SplitViewActiveTabsTest) for whenever that lands.
+        activeComponent.addTab(terminalTab, activate = true)
     }
 }
 

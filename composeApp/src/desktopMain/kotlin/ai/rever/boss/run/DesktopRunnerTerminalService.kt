@@ -1,6 +1,5 @@
 package ai.rever.boss.run
 
-import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.events.RunnerTerminalEventBus
 import ai.rever.boss.plugin.api.SIDEBAR_TERMINAL_ID
 import ai.rever.boss.plugin.run.Language
@@ -15,11 +14,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -76,13 +78,19 @@ actual object RunnerTerminalService {
     }
 
     /**
-     * Remove a config from a terminal's tracking set.
+     * Remove a config from a terminal's tracking set, dropping the terminal's own entry once its
+     * set is empty - every superseded re-run leaves one behind otherwise, since this only ever
+     * empties a set and never removes the now-pointless key.
      */
     private fun removeConfigFromTerminal(
         terminalId: String,
         configId: String,
     ) {
-        terminalToConfigs[terminalId]?.remove(configId)
+        val remaining = terminalToConfigs[terminalId] ?: return
+        remaining.remove(configId)
+        if (remaining.isEmpty()) {
+            terminalToConfigs.remove(terminalId, remaining)
+        }
     }
 
     /**
@@ -266,6 +274,13 @@ actual object RunnerTerminalService {
      * and creates a new one with the same command.
      * For sidebar panel: Ctrl+C is handled by openInSidebarTerminal via the isRerun flag.
      *
+     * The returned id is not always a terminal that exists: when the re-run was superseded by a
+     * concurrent stop/re-run, or when the caller itself was cancelled during teardown, this
+     * returns the id it *would* have opened without calling [onTerminalCreated] or emitting
+     * anything - both current callers ([ai.rever.boss.components.bars.horizontal.BossTopRunBar])
+     * ignore the return value, so this has been silent so far, but a future caller that trusts it
+     * should not.
+     *
      * @param windowId The window ID that initiated the run (Issue #498)
      */
     actual suspend fun rerunRunner(
@@ -340,19 +355,7 @@ actual object RunnerTerminalService {
             }
         }
 
-        // The delay above hands the scheduler to whatever else is runnable - long enough for a
-        // concurrent stopRunner or a second rerunRunner for the same config to land first and
-        // move _configToTerminal on. If that happened, this call's plan is stale: opening
-        // terminalId now would track a tab nothing else agrees exists, and Stop could never
-        // close it (the same shape as the pre-existing race this delay widened from ~0ms to
-        // rerunDelayMs). Bail rather than compound it.
-        val stillOurs = stateLock.withLock { _configToTerminal.value[config.id] == terminalId }
-        if (!stillOurs) {
-            logger.debug(
-                LogCategory.TERMINAL,
-                "Re-run superseded by a concurrent stop or re-run - not opening a stale terminal",
-                mapOf("configId" to config.id, "terminalId" to terminalId),
-            )
+        if (!rerunStillValid(config, windowId, terminalId)) {
             return terminalId
         }
 
@@ -369,6 +372,66 @@ actual object RunnerTerminalService {
 
         onTerminalCreated(terminalId)
         return terminalId
+    }
+
+    /**
+     * Whether [rerunRunner] may still open [terminalId] for [config] in [windowId] - `false` means
+     * the caller should bail and return [terminalId] unopened.
+     *
+     * Two independent reasons to bail, both about staleness since the teardown above ran:
+     *
+     * **Superseded.** The delay inside the teardown hands the scheduler to whatever else is
+     * runnable - long enough for a concurrent [stopRunner] or a second [rerunRunner] for the same
+     * config to land first and move `_configToTerminal` on. Opening `terminalId` then would track
+     * a tab nothing else agrees exists, and Stop could never close it (the same shape as the
+     * pre-existing race this delay widened from ~0ms to `rerunDelayMs`). Window membership is
+     * checked too, not just the terminal id: [stopRunner] leaves `_configToTerminal` untouched
+     * when the config is still running in *another* window, so a Stop in *this* window during the
+     * delay would otherwise still read as "ours".
+     *
+     * **Caller cancelled.** `withContext(NonCancellable)` above guarantees the interrupt/close
+     * teardown of the terminal being replaced always finishes; it guarantees nothing about what
+     * runs after it returns to a caller cancelled *during* that teardown (a window closing, the
+     * run bar leaving composition) - neither `stateLock.withLock` nor the `RunnerTerminalEventBus`
+     * emit below are suspension points that check cancellation on their own. Reproduced directly:
+     * cancel during the close and the event sequence comes out `[Open, Close, Open]`, not
+     * `[Open, Close]` - a cancelled caller still requesting a replacement. If the config is still
+     * ours when this happens, the old terminal is already gone and the new one is never opened, so
+     * neither exists - the state swapped at the top of [rerunRunner] must not keep pointing at a
+     * `terminalId` nothing will create. [kotlinx.coroutines.ensureActive] rethrows the
+     * cancellation after that rollback, rather than this function returning `false` for it.
+     */
+    private suspend fun rerunStillValid(
+        config: RunConfiguration,
+        windowId: String,
+        terminalId: String,
+    ): Boolean {
+        val stillOurs =
+            stateLock.withLock {
+                _configToTerminal.value[config.id] == terminalId &&
+                    _configToWindows.value[config.id]?.contains(windowId) == true
+            }
+
+        if (!currentCoroutineContext().isActive) {
+            if (stillOurs) {
+                stateLock.withLock {
+                    _configToTerminal.update { it - config.id }
+                    removeConfigFromTerminal(terminalId, config.id)
+                    _runningConfigs.update { it - config.id }
+                    removeWindowFromConfig(config.id, windowId)
+                }
+            }
+            currentCoroutineContext().ensureActive()
+        }
+
+        if (!stillOurs) {
+            logger.debug(
+                LogCategory.TERMINAL,
+                "Re-run superseded by a concurrent stop or re-run - not opening a stale terminal",
+                mapOf("configId" to config.id, "terminalId" to terminalId),
+            )
+        }
+        return stillOurs
     }
 
     /**
@@ -406,14 +469,21 @@ actual object RunnerTerminalService {
      * Remove tracking for a terminal tab (when tab is closed).
      * For terminals with multiple configs (sidebar), removes all.
      *
-     * This is the one path a real terminal exit reaches: the terminal-tab plugin's
+     * This is the one path a real terminal exit *could* reach: the terminal-tab plugin's
      * `setOnRunnerTerminalRemoved` callback and the host's own close-event handler
-     * (`BossAppEventBusEffects`) both call it - [markTerminalStopped] has no caller at all.
-     * It also fires for a user closing the tab by hand and for [rerunRunner]'s own teardown of
-     * the terminal it is replacing, where "finished" is not quite the right word - there is no
-     * plugin-side exit-code signal threaded through yet to tell those apart from a genuine
-     * process exit. `notifyOnExit` is documented as "when a runner process exits"; this is the
-     * closest approximation the host can make of that today.
+     * (`BossAppEventBusEffects`) both call it - [markTerminalStopped] has no caller at all. But
+     * it is a **tab-removal** callback, not a process-exit one, and firing `notifyOnExit` from it
+     * was tried and reverted (BossConsole#486 review): it fires for a user closing a still-running
+     * tab by hand (announcing "finished" for something that is not), it is emptied out from under
+     * itself by [stopRunner] and [rerunRunner] - both clear this terminal's tracking *before* the
+     * close that would otherwise land here, specifically so a deliberate stop/re-run does not
+     * misreport as a completion - and on the default `SIDEBAR_PANEL` target it never fires at all
+     * ([removeConfig] is the path there, and has no notification either). A wrong "finished" is
+     * worse than a missing one, so `notifyOnExit` stays unwired until a real per-run completion
+     * signal exists. The terminal-tab plugin's `TerminalTabComponent.onExit` is empty and its
+     * activity-flow surface (`boss-plugin-api` 1.0.88) is not yet read by anything here - either
+     * would need to distinguish a genuine process exit from every one of the cases above, correct
+     * for windows/configs sharing one terminal, before this can announce anything.
      *
      * @param windowId The window ID
      * @param terminalId The terminal tab ID
@@ -422,37 +492,25 @@ actual object RunnerTerminalService {
         windowId: String,
         terminalId: String,
     ) {
-        val configIds =
-            stateLock.withLock {
-                val ids = terminalToConfigs.remove(terminalId)?.toSet() ?: emptySet()
-                if (ids.isNotEmpty()) {
-                    _configToTerminal.update { current ->
-                        current.filterKeys { it !in ids }
-                    }
-                    _runningConfigs.update { it - ids }
-                    // Clean up window mapping
-                    ids.forEach { removeAllWindowsFromConfig(it) }
-                    logger.debug(
-                        LogCategory.TERMINAL,
-                        "Terminal removed",
-                        mapOf(
-                            "terminalId" to terminalId,
-                            "configs" to ids.toString(),
-                            "windowId" to windowId,
-                        ),
-                    )
+        stateLock.withLock {
+            val ids = terminalToConfigs.remove(terminalId)?.toSet() ?: emptySet()
+            if (ids.isNotEmpty()) {
+                _configToTerminal.update { current ->
+                    current.filterKeys { it !in ids }
                 }
-                ids
+                _runningConfigs.update { it - ids }
+                // Clean up window mapping
+                ids.forEach { removeAllWindowsFromConfig(it) }
+                logger.debug(
+                    LogCategory.TERMINAL,
+                    "Terminal removed",
+                    mapOf(
+                        "terminalId" to terminalId,
+                        "configs" to ids.toString(),
+                        "windowId" to windowId,
+                    ),
+                )
             }
-
-        if (configIds.isNotEmpty() && RunnerSettingsManager.currentSettings.value.notifyOnExit) {
-            val names =
-                configIds.map { id ->
-                    RunConfigurationManager.currentSettings.value.configurations
-                        .find { it.id == id }
-                        ?.name ?: id
-                }
-            StatusMessageManager.showMessage("${names.joinToString(", ")} finished")
         }
 
         // Clear sidebar tab tracking for this window outside lock (I/O operation)
