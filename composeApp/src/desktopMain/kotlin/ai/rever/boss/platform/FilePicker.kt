@@ -1,5 +1,6 @@
 package ai.rever.boss.platform
 
+import ai.rever.boss.utils.WindowFocusManager
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import androidx.compose.runtime.Composable
@@ -138,23 +139,45 @@ actual fun pickSaveFile(
  */
 actual fun confirmExecutableDownload(fileName: String): Boolean =
     confirmExecutableDownloadOnEdt {
-        val options = arrayOf("Download", "Cancel")
+        // A background download still needs an owner that the operator can raise.
+        // Without any usable BOSS window, refuse instead of creating an orphan modal.
+        val activeWindow = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+        val fallbackWindowId = WindowFocusManager.resolveActionableWindowId()
+        val owner =
+            activeWindow?.takeIf { it.isDisplayable }
+                ?: fallbackWindowId?.let(WindowFocusManager::getWindow)?.takeIf { it.isDisplayable }
+                ?: return@confirmExecutableDownloadOnEdt JOptionPane.CLOSED_OPTION
         JOptionPane.showOptionDialog(
-            KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow,
+            owner,
             "\"$fileName\" may be executable. Only download and run it if you trust its source.",
             "Confirm download",
             JOptionPane.OK_CANCEL_OPTION,
             JOptionPane.WARNING_MESSAGE,
             null,
-            options,
-            options[1],
+            ExecutableDownloadOption.entries.toTypedArray(),
+            ExecutableDownloadOption.CANCEL,
         )
     }
+
+private enum class ExecutableDownloadOption(
+    private val label: String,
+) {
+    DOWNLOAD("Download"),
+    CANCEL("Cancel"),
+    ;
+
+    override fun toString(): String = label
+}
 
 /** The dialog is injectable so consent, failure and EDT dispatch can be tested without a window. */
 internal fun confirmExecutableDownloadOnEdt(showDialog: () -> Int): Boolean {
     var proceed = false
-    val prompt = Runnable { proceed = showDialog() == JOptionPane.OK_OPTION }
+    val prompt =
+        Runnable {
+            // Custom Swing options return their index. Map through the same entries that
+            // populated the dialog, so changing their order cannot turn Cancel into consent.
+            proceed = ExecutableDownloadOption.entries.getOrNull(showDialog()) == ExecutableDownloadOption.DOWNLOAD
+        }
     return try {
         if (SwingUtilities.isEventDispatchThread()) {
             prompt.run()
