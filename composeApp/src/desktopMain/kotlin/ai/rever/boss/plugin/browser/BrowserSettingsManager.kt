@@ -26,6 +26,8 @@ data class BrowserSettingsData(
     val offerToSavePasswords: Boolean = true,
     // Tab sharing — show the co-browse share (QR) button in the browser toolbar (off by default)
     val showShareButton: Boolean = false,
+    // Ask for consent before saving a file with a recognized executable extension (on by default)
+    val warnForExecutables: Boolean = true,
 )
 
 object BrowserSettingsManager {
@@ -73,6 +75,7 @@ object BrowserSettingsManager {
                 BrowserSettings.offerToSavePasswords = settings.offerToSavePasswords
                 // Tab sharing (setter mirrors to the system property the plugin reads)
                 BrowserSettings.showShareButton = settings.showShareButton
+                BrowserSettings.warnForExecutables = settings.warnForExecutables
 
                 // Update available profiles if we have more
                 if (settings.availableProfiles.isNotEmpty()) {
@@ -100,6 +103,7 @@ object BrowserSettingsManager {
                         suggestPasswords = BrowserSettings.suggestPasswords,
                         offerToSavePasswords = BrowserSettings.offerToSavePasswords,
                         showShareButton = BrowserSettings.showShareButton,
+                        warnForExecutables = BrowserSettings.warnForExecutables,
                     )
 
                 val content = json.encodeToString(settings)

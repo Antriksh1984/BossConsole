@@ -3261,9 +3261,11 @@ object FluckEngine {
                         return@StartDownloadCallback
                     }
 
-                    // Warn for executable files
+                    // Warn for executable files. Read live from BrowserSettings, not the
+                    // unpersisted downloadSettings copy, so a toggle in Settings > Browser >
+                    // Downloads applies to this download without an application restart.
                     if (!executableDownloadAllowed(
-                            downloadSettings.warnForExecutables,
+                            BrowserSettings.warnForExecutables,
                             sanitizedFileName,
                             savedFileName,
                             ::confirmExecutableDownload,
