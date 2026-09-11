@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -452,5 +453,127 @@ class McpGovernedInvocationTest {
             val request = approvalBus.pendingList.first { it.isNotEmpty() }.first()
             approvalBus.deny(request.id)
             assertTrue(job.await().isError)
+        }
+
+    // A registry wired to a policy file whose parent path is a file, so the atomic
+    // write's directory creation fails - the same blocked-write setup the per-tool
+    // failure case uses in McpPersistentApprovalTest.
+    private class ProviderPolicyFailureFixture(
+        providerToRegister: McpToolProvider,
+    ) {
+        val dir = Files.createTempDirectory("mcp-provider-policy-failure").toFile()
+        private val parent = dir.resolve("parent")
+        val policyEngine = McpPolicyEngine(parent.resolve("policy.json"))
+        val approvalBus = McpApprovalBus(defaultTimeoutMs = 5000L)
+        val ledger = McpOperationLedger(ledgerFile = null)
+        val core =
+            McpToolRegistryCore(
+                disabledFile = null,
+                policyEngine = policyEngine,
+                approvalBus = approvalBus,
+                ledger = ledger,
+            )
+
+        init {
+            parent.writeText("blocks directory creation")
+            core.registerProvider(providerToRegister)
+        }
+
+        fun close() = dir.deleteRecursively()
+    }
+
+    private fun failingProviderFixture(
+        onCommand: () -> Unit,
+        onDelete: () -> Unit,
+    ): ProviderPolicyFailureFixture =
+        ProviderPolicyFailureFixture(
+            provider(
+                "terminal-tab",
+                echoTool(
+                    "run_command",
+                    handler =
+                        McpToolHandler {
+                            onCommand()
+                            McpToolResult("ran")
+                        },
+                ),
+                echoTool(
+                    "k8s_delete",
+                    handler =
+                        McpToolHandler {
+                            onDelete()
+                            McpToolResult("deleted")
+                        },
+                ),
+            ),
+        )
+
+    @Test
+    fun `a failed provider persist still runs the approved call and records the fallback`() =
+        runBlocking {
+            var commandCalls = 0
+            val fixture = failingProviderFixture(onCommand = { commandCalls++ }, onDelete = { })
+            try {
+                // Approve with "Trust This Plugin"; the provider-wide write cannot persist.
+                val call = async { fixture.core.invoke("run_command", "{}") }
+                val request =
+                    fixture.approvalBus.pendingList
+                        .first { it.isNotEmpty() }
+                        .first()
+                fixture.approvalBus.approve(request.id, trustProvider = true)
+
+                // A failed persist must not block the already-approved call, and the
+                // ledger records that the durable grant did not save.
+                assertFalse(call.await().isError)
+                assertEquals(1, commandCalls)
+                assertTrue(fixture.policyEngine.fault.value is McpPolicyFault.ProviderPolicyPersistFailed)
+                assertEquals(
+                    McpApprovalDisposition.PROVIDER_TRUST_PERSIST_FAILED,
+                    fixture.ledger.recentOperations.value
+                        .single()
+                        .approvalDisposition,
+                )
+
+                // The fallback is per-tool: this one tool is session-trusted, so it runs
+                // again without a prompt.
+                assertFalse(fixture.core.invoke("run_command", "{}").isError)
+                assertEquals(2, commandCalls)
+                assertTrue(
+                    fixture.approvalBus.pendingList.value
+                        .isEmpty(),
+                )
+            } finally {
+                fixture.close()
+            }
+        }
+
+    @Test
+    fun `a failed provider persist does not cover the provider's other tools`() =
+        runBlocking {
+            var deleteCalls = 0
+            val fixture = failingProviderFixture(onCommand = { }, onDelete = { deleteCalls++ })
+            try {
+                val call = async { fixture.core.invoke("run_command", "{}") }
+                val request =
+                    fixture.approvalBus.pendingList
+                        .first { it.isNotEmpty() }
+                        .first()
+                fixture.approvalBus.approve(request.id, trustProvider = true)
+                call.await()
+
+                // No provider rule survived the failed write, so a sibling tool from the
+                // same provider is not covered and still asks.
+                assertEquals(0, deleteCalls)
+                val siblingCall = async { fixture.core.invoke("k8s_delete", "{}") }
+                val siblingRequest =
+                    fixture.approvalBus.pendingList
+                        .first { it.isNotEmpty() }
+                        .first()
+                fixture.approvalBus.deny(siblingRequest.id)
+                assertTrue(siblingCall.await().isError)
+                assertEquals(0, deleteCalls)
+            } finally {
+                fixture.close()
+            }
         }
 }
