@@ -13,6 +13,7 @@ async function fixture(options: {
   failFetch?: boolean
   hang?: boolean
   stallStream?: boolean
+  removeToolsAfterPreflight?: boolean
   keyName?: string
   apiType?: "openai_chat" | "openai_responses"
 } = {}) {
@@ -44,7 +45,9 @@ async function fixture(options: {
             upstream_model: "private-model",
             context_length: 4096,
             max_output_tokens: 512,
-            capabilities: ["text"],
+            capabilities: options.removeToolsAfterPreflight && name === "boss_ai_lookup"
+              ? ["text", "tools"]
+              : ["text"],
           },
           connection: {
             base_url: "https://upstream.example/v1",
@@ -111,6 +114,26 @@ Deno.test("all inference and catalog access requires AI-scoped authentication", 
   assertEquals(f.requests.length, 0)
 })
 
+Deno.test("invalid routes and oversized requests fail before database access", async () => {
+  const f = await fixture()
+  for (const [path, method] of [["auth/token", "GET"], ["v1/models", "POST"], ["unknown", "GET"]]) {
+    const response = await f.handler(
+      new Request(`https://api.example/boss-ai/${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${f.token}` },
+      }),
+    )
+    assertEquals(response.status, 404)
+    assert(response.headers.get("x-request-id"))
+  }
+  const response = await f.handler(
+    f.request({ ...body, messages: [{ role: "user", content: "x".repeat(5 * 1024 * 1024) }] }),
+  )
+  assertEquals(response.status, 413)
+  assertEquals(f.calls.length, 0)
+  assertEquals(f.requests.length, 0)
+})
+
 Deno.test("broker accepts a BOSS session but not an AI token", async () => {
   const f = await fixture()
   const req = (t: string) =>
@@ -173,6 +196,17 @@ Deno.test("invalid inputs never create accounting reservations", async () => {
   assertEquals(f.requests.length, 0)
 })
 
+Deno.test("admission revalidates changed model capabilities and refunds without dispatch", async () => {
+  const f = await fixture({ removeToolsAfterPreflight: true })
+  const response = await f.handler(
+    f.request({ ...body, tools: [{ type: "function", function: { name: "test" } }] }),
+  )
+  assertEquals(response.status, 400)
+  assertEquals(f.calls.map((c) => c.name), ["boss_ai_lookup", "boss_ai_reserve", "boss_ai_settle"])
+  assertEquals(f.calls.at(-1)?.params.p_tokens, 0)
+  assertEquals(f.requests.length, 0)
+})
+
 Deno.test("duplicate admission is a conflict and pre-dispatch abort refunds without fetch", async () => {
   const duplicate = await fixture({ deny: "duplicate" })
   assertEquals((await duplicate.handler(duplicate.request(body))).status, 409)
@@ -204,6 +238,15 @@ Deno.test("a stalled SSE body times out and settles without hanging the client",
   assert(!output.includes("[DONE]"))
   assertEquals(f.calls.filter((call) => call.name === "boss_ai_settle").length, 1)
   assertEquals(f.calls.at(-1)?.params.p_tokens, null)
+})
+
+Deno.test("late stream truncation preserves already reported usage", async () => {
+  const f = await fixture({
+    stream: 'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5}}\n\n',
+  })
+  const response = await f.handler(f.request({ ...body, stream: true }))
+  assert((await response.text()).includes("stream_failed"))
+  assertEquals(f.calls.at(-1)?.params.p_tokens, 17)
 })
 
 Deno.test("complete streams settle final usage and terminate once", async () => {

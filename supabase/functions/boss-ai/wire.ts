@@ -127,6 +127,12 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
     throw invalid()
   }
   if (input.stream !== undefined && typeof input.stream !== "boolean") throw invalid()
+  if (input.stream_options !== undefined) {
+    const options = object(input.stream_options)
+    onlyKeys(options, ["include_usage"])
+    // Accounting requires usage. Gateway requests true; explicitly declining it is unsupported.
+    if (options.include_usage !== undefined && options.include_usage !== true) throw invalid()
+  }
   const messages = input.messages.map((value) => {
     const m = object(value)
     if (

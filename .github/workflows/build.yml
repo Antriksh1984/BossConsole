@@ -395,7 +395,7 @@ jobs:
     name: 🧪 Database (pgTAP)
     runs-on: ubuntu-latest
     needs: [version-check, boss-ai-tests]
-    if: always() && needs.version-check.result == 'success'
+    if: ${{ !cancelled() && needs.version-check.result == 'success' }}
 
     steps:
       - name: Require BOSS AI contract checks
@@ -430,7 +430,7 @@ jobs:
         run: supabase stop --no-backup || true
 
   build-summary:
-    if: always()
+    if: ${{ !cancelled() }}
     needs: [version-check, build-test, code-quality, compatibility-test, database-tests, boss-ai-tests]
     runs-on: ubuntu-latest
 

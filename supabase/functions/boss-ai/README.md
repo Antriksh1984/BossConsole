@@ -32,7 +32,9 @@ history all fit the allowlist. This is a constrained Chat Completions surface, n
 support every OpenAI parameter. Unknown top-level fields and function/format/image envelopes are
 rejected; JSON Schema contents remain opaque schema data. `reasoning` is descriptive metadata for
 models that reason internally, not an exposed reasoning-effort control. Reasoning usage remains
-included in the output count regardless of that metadata.
+included in the output count regardless of that metadata. Streaming always requests usage for
+accounting; `stream_options` accepts only `include_usage=true` (or an empty object), never disabling
+usage or adding vendor fields.
 
 No migration publishes a made-up model, invents an API key, or picks an allowance. Those are
 required deployment inputs. Plugin bundling is outside this change.
@@ -129,9 +131,9 @@ the request ledger for an audited correction; clients cannot refund themselves.
 Missing usage emits `usage_unknown_reservation_retained`; it is never silently treated as zero.
 Published connections must pass both streaming and non-streaming usage checks before rollout. An
 upstream reporting more than the configured context emits `usage_exceeds_configured_context`, and
-the charge is capped at the admitted reservation. A retry of settlement preserves measured usage
-rather than converting it into an unknown outcome. Investigate either diagnostic before continuing
-to publish the connection.
+the charge is capped at the admitted reservation. Settlement retries and late stream truncation
+after a usage frame preserve the measured count rather than treating it as unknown. Investigate
+either diagnostic before continuing to publish the connection.
 
 Requests are limited to four minutes, below the five-minute concurrency lease. A worker crash leaves
 the charge in place but releases its concurrency slot after the lease. Usage rows should be retained

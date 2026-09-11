@@ -27,13 +27,15 @@ first = second = None
 try:
     query(f"""
       INSERT INTO auth.users(id,email) VALUES('{USER}','boss-ai-concurrency@pgtap.test');
-      INSERT INTO public.boss_ai_connections VALUES
+      INSERT INTO public.boss_ai_connections(id,base_url,api_key_secret,api_type,enabled) VALUES
         ('concurrency-test','https://example.com/v1','BOSS_AI_TEST','openai_chat',true);
       INSERT INTO public.boss_ai_models
         (id,display_name,connection_id,upstream_model,context_length,max_output_tokens,published)
         VALUES('concurrency-test','Test','concurrency-test','private',1024,128,true);
-      INSERT INTO public.boss_ai_allowances VALUES('concurrency-test','ai.use',1024,1024,1024,2);
+      INSERT INTO public.boss_ai_allowances(model_id,permission_name,tokens_per_day,tokens_per_week,tokens_per_month,max_concurrent)
+        VALUES('concurrency-test','ai.use',1024,1024,1024,2);
     """)
+    assert query(f"SELECT public.user_has_permission('{USER}','ai.use')") == "t", "Baseline AI role grant missing"
     for isolation in ["REPEATABLE READ", "SERIALIZABLE"]:
         rejected = subprocess.run(PSQL + ["-c",
             f"BEGIN ISOLATION LEVEL {isolation}; SELECT public.boss_ai_reserve('{USER}','concurrency-test','{FIRST}');"],

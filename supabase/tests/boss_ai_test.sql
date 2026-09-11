@@ -4,12 +4,13 @@ SELECT no_plan();
 INSERT INTO auth.users(id,email) VALUES
  ('ba000000-0000-4000-8000-000000000001','boss-ai-one@pgtap.test'),
  ('ba000000-0000-4000-8000-000000000002','boss-ai-two@pgtap.test');
-INSERT INTO public.boss_ai_connections VALUES
+INSERT INTO public.boss_ai_connections(id,base_url,api_key_secret,api_type,enabled) VALUES
  ('pgtap','https://example.com/v1','BOSS_AI_TEST','openai_chat',true);
 INSERT INTO public.boss_ai_models
  (id,display_name,connection_id,upstream_model,context_length,max_output_tokens,published)
  VALUES('pgtap','Test','pgtap','private',1024,128,true);
-INSERT INTO public.boss_ai_allowances VALUES('pgtap','ai.use',10240,20480,40960,2);
+INSERT INTO public.boss_ai_allowances(model_id,permission_name,tokens_per_day,tokens_per_week,tokens_per_month,max_concurrent)
+ VALUES('pgtap','ai.use',10240,20480,40960,2);
 
 SELECT ok(public.user_has_permission('ba000000-0000-4000-8000-000000000001','ai.use'),
  'new users inherit the baseline AI permission through real RBAC');

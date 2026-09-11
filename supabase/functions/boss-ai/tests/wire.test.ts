@@ -55,6 +55,22 @@ Deno.test("upstream secret lookup is safe without calling endpoint first", () =>
 })
 const input = { model: model.id, messages: [{ role: "user", content: "hello" }] }
 
+Deno.test("stream options permit accounting usage but reject disabling it or extensions", () => {
+  const input = { messages: [{ role: "user", content: "hello" }], stream: true }
+  assertEquals(
+    requestBody({ ...input, stream_options: { include_usage: true } }, model, "openai_chat")
+      .stream_options,
+    { include_usage: true },
+  )
+  for (
+    const stream_options of [null, { include_usage: false }, { include_usage: "true" }, {
+      provider: "override",
+    }]
+  ) {
+    assertThrows(() => requestBody({ ...input, stream_options }, model, "openai_chat"))
+  }
+})
+
 Deno.test("routing overrides and unadvertised capabilities are refused", () => {
   for (const field of ["base_url", "api_key", "provider", "n", "previous_response_id"]) {
     assertThrows(() => requestBody({ ...input, [field]: "override" }, model, "openai_chat"))

@@ -228,7 +228,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
             }
           } catch {
             audit("stream_failed")
-            await finish(null)
+            await finish(adapter.tokens)
             if (clientCancelled) return
             controller.enqueue(
               frame({
@@ -243,7 +243,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         },
         async cancel() {
           clientCancelled = true
-          await finish(null)
+          await finish(adapter.tokens)
         },
       })
       return new Response(stream, {
