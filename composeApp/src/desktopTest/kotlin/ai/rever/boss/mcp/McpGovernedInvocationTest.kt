@@ -363,4 +363,94 @@ class McpGovernedInvocationTest {
                     .approvalDisposition,
             )
         }
+
+    @Test
+    fun `approving one tool with trustProvider lets a sibling tool from the same provider through without asking`() =
+        runBlocking {
+            var firstCalled = false
+            var secondCalled = false
+            val policyEngine = McpPolicyEngine(policyFile = null)
+            val approvalBus = McpApprovalBus(defaultTimeoutMs = 5000L)
+            val ledger = McpOperationLedger(ledgerFile = null)
+            val core =
+                McpToolRegistryCore(
+                    disabledFile = null,
+                    policyEngine = policyEngine,
+                    approvalBus = approvalBus,
+                    ledger = ledger,
+                )
+            core.registerProvider(
+                provider(
+                    "terminal-tab",
+                    echoTool(
+                        "run_command",
+                        handler =
+                            McpToolHandler {
+                                firstCalled = true
+                                McpToolResult("ran")
+                            },
+                    ),
+                    echoTool(
+                        "k8s_delete",
+                        handler =
+                            McpToolHandler {
+                                secondCalled = true
+                                McpToolResult("deleted")
+                            },
+                    ),
+                ),
+            )
+
+            // First call: ASK, approve with "Trust This Plugin".
+            val firstResult = async { core.invoke("run_command", "{}") }
+            val firstRequest = approvalBus.pendingList.first { it.isNotEmpty() }.first()
+            assertEquals("terminal-tab", firstRequest.providerId)
+            approvalBus.approve(firstRequest.id, trustForSession = false, trustProvider = true)
+            assertFalse(firstResult.await().isError)
+            assertTrue(firstCalled)
+            assertEquals(
+                McpApprovalDisposition.PROVIDER_TRUSTED,
+                ledger.recentOperations.value
+                    .first()
+                    .approvalDisposition,
+            )
+
+            // Second call, a DIFFERENT tool from the SAME provider: no approval prompt at all -
+            // the provider-wide rule the first call just persisted covers it.
+            val secondResult = core.invoke("k8s_delete", "{}")
+            assertFalse(secondResult.isError)
+            assertTrue(secondCalled)
+            assertTrue(approvalBus.pendingList.value.isEmpty(), "the second call must never have queued a prompt")
+
+            // And it really did persist, not just live in this run's session trust: a fresh
+            // engine reading the same policy would agree without ever calling trustForSession.
+            assertEquals(McpPolicyAction.ALLOW, policyEngine.policyFor("k8s_delete", "terminal-tab"))
+        }
+
+    @Test
+    fun `revoking provider trust makes its tools ask again`() =
+        runBlocking {
+            val policyEngine = McpPolicyEngine(policyFile = null)
+            policyEngine.setProviderPolicy("terminal-tab", McpPolicyAction.ALLOW)
+            val approvalBus = McpApprovalBus(defaultTimeoutMs = 5000L)
+            val core =
+                McpToolRegistryCore(
+                    disabledFile = null,
+                    policyEngine = policyEngine,
+                    approvalBus = approvalBus,
+                )
+            core.registerProvider(provider("terminal-tab", echoTool("run_command")))
+
+            // Trusted: runs immediately, no prompt.
+            assertFalse(core.invoke("run_command", "{}").isError)
+            assertTrue(approvalBus.pendingList.value.isEmpty())
+
+            policyEngine.revokeProviderPolicy("terminal-tab")
+
+            // Revoked: back to ASK, so this call suspends for a real prompt.
+            val job = async { core.invoke("run_command", "{}") }
+            val request = approvalBus.pendingList.first { it.isNotEmpty() }.first()
+            approvalBus.deny(request.id)
+            assertTrue(job.await().isError)
+        }
 }
