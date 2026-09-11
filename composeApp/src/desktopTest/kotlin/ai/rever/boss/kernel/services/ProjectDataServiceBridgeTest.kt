@@ -88,7 +88,8 @@ class ProjectDataServiceBridgeTest {
 
             assertTrue(
                 emittedPaths == before || emittedPaths == after,
-                "emitted $emittedPaths matched neither the pre-emission snapshot $before nor the post-emission snapshot $after",
+                "emitted $emittedPaths matched neither the pre-emission snapshot $before " +
+                    "nor the post-emission snapshot $after",
             )
             assertNotEquals(listOf(decoy.path), emittedPaths)
         }
