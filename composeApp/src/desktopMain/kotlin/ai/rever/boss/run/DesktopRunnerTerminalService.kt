@@ -337,6 +337,11 @@ actual object RunnerTerminalService {
         // (it is a RuntimeException), logged it as a fault, and skipped closeRunnerTerminal -
         // which is the bug this whole block exists to avoid, so the explicit rethrow stays as
         // defense in depth even though nothing inside NonCancellable can actually be cancelled.
+        // Only a window whose tab was actually torn down should be rolled back on cancellation.
+        // SIDEBAR_PANEL (and a first-ever run, where existingTerminalId is null) never interrupts
+        // or closes anything below, so there is nothing of existingWindowId's to undo there.
+        val tornDownWindowId = existingWindowId?.takeIf { existingTerminalId != null && !usesSidebar }
+
         if (existingTerminalId != null && existingWindowId != null && !usesSidebar) {
             withContext(NonCancellable) {
                 try {
@@ -361,7 +366,7 @@ actual object RunnerTerminalService {
             }
         }
 
-        if (!rerunStillValid(config, windowId, terminalId, existingTerminalId, existingWindowId)) {
+        if (!rerunStillValid(config, windowId, terminalId, existingTerminalId, tornDownWindowId)) {
             return terminalId
         }
 
@@ -383,7 +388,10 @@ actual object RunnerTerminalService {
     /**
      * Reject a replacement superseded during teardown, and roll back a cancelled caller.
      * Open/close events are window-scoped: several windows can have separate live tabs with
-     * the same terminal ID. Restore the old ID for windows whose tabs were not closed.
+     * the same terminal ID. Restore the old ID for windows whose tabs were not closed, and
+     * remove no window's registration when none was closed in the first place - [tornDownWindowId]
+     * is null on the SIDEBAR_PANEL target (and on a first-ever run), where nothing above this call
+     * interrupted or closed anything.
      * Ownership and rollback share one lock; cancellation is sampled once so cleanup and
      * throwing cannot disagree. A later Stop can still race the subsequent open event.
      */
@@ -392,7 +400,7 @@ actual object RunnerTerminalService {
         windowId: String,
         terminalId: String,
         existingTerminalId: String?,
-        existingWindowId: String?,
+        tornDownWindowId: String?,
     ): Boolean {
         val callerContext = currentCoroutineContext()
         val cancelled = !callerContext.isActive
@@ -404,7 +412,7 @@ actual object RunnerTerminalService {
                 // Ownership and rollback must share the lock so a newer run cannot be erased.
                 if (cancelled && ownsTerminal) {
                     removeConfigFromTerminal(terminalId, config.id)
-                    removeWindowFromConfig(config.id, existingWindowId ?: windowId)
+                    tornDownWindowId?.let { removeWindowFromConfig(config.id, it) }
                     if (existingTerminalId != null && _configToWindows.value[config.id]?.isNotEmpty() == true) {
                         _configToTerminal.update { it + (config.id to existingTerminalId) }
                         addConfigToTerminal(existingTerminalId, config.id)
@@ -494,10 +502,18 @@ actual object RunnerTerminalService {
                     removeWindowFromConfig(configId, windowId)
                     if (_configToWindows.value[configId].isNullOrEmpty()) {
                         removeConfigFromTerminal(terminalId, configId)
+                        // _configToTerminal is only ours to clear if it still names this
+                        // terminal - a newer re-run may already have moved it to a replacement
+                        // that has not opened a window yet, and erasing that mapping here would
+                        // orphan it. But _runningConfigs tracks window OWNERSHIP, not which
+                        // terminal is authoritative: once no window is left for this config, it
+                        // must stop reading as running regardless of which terminal superseded
+                        // this one, or isConfigRunning() and isConfigRunningInWindow() disagree
+                        // with no window anywhere to make either one true again.
                         if (_configToTerminal.value[configId] == terminalId) {
                             _configToTerminal.update { it - configId }
-                            _runningConfigs.update { it - configId }
                         }
+                        _runningConfigs.update { it - configId }
                     }
                 }
                 logger.debug(

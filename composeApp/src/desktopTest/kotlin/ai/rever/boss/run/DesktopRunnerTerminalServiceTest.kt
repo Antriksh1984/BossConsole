@@ -9,13 +9,16 @@ import ai.rever.boss.plugin.run.RunnerTerminalCloseEvent
 import ai.rever.boss.plugin.run.RunnerTerminalOpenEvent
 import ai.rever.boss.plugin.run.RunnerTerminalStopEvent
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -168,5 +171,111 @@ class DesktopRunnerTerminalServiceTest {
             assertTrue(liveTabs.isEmpty())
             assertFalse(RunnerTerminalService.isConfigRunning(config.id))
             assertNull(RunnerTerminalService.configToTerminal.value[config.id])
+        }
+
+    /**
+     * BossConsole#486 review round 4, finding 1. `rerunStillValid`'s rollback removed
+     * `existingWindowId` unconditionally, even under SIDEBAR_PANEL where the interrupt/close
+     * teardown above it never runs (`usesSidebar` skips it entirely) - so a cancelled sidebar
+     * rerun dropped a window's running state for a tab nobody touched.
+     *
+     * SIDEBAR_PANEL emits no close event, so this cannot hook cancellation the way the
+     * MAIN_PANEL tests above do (on `RunnerTerminalCloseEvent`). Cancellation is injected before
+     * `rerunRunner` ever starts instead: [CoroutineStart.ATOMIC] guarantees the coroutine still
+     * runs its body - the state swap included - even though the job is already cancelled by the
+     * time it's scheduled, so `rerunStillValid`'s `!callerContext.isActive` read observes it.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    @Test
+    fun `cancelled sidebar rerun preserves both windows and their terminal mapping`() =
+        runBlocking {
+            RunnerSettingsManager.setTerminalTarget(RunnerTerminalTarget.SIDEBAR_PANEL)
+            val events = mutableListOf<String>()
+            RunnerTerminalEventBus.ipcBridge =
+                object : IpcEventBridge {
+                    override suspend fun forward(
+                        eventType: String,
+                        payload: Any,
+                        sourceWindowId: String,
+                    ) {
+                        events += eventType
+                    }
+                }
+
+            val originalId = RunnerTerminalService.openRunnerTerminal(config, windowA) {}
+            RunnerTerminalService.openRunnerTerminal(config, windowB) {}
+
+            val job = launch(start = CoroutineStart.ATOMIC) { RunnerTerminalService.rerunRunner(config, windowB) {} }
+            job.cancel()
+            job.join()
+
+            assertTrue(job.isCancelled)
+            // Only the two initial opens: SIDEBAR_PANEL has no interrupt/close teardown to emit
+            // anything for, and rerunStillValid's rollback fires before a rerun ever opens.
+            assertEquals(listOf("RunnerTerminalOpenEvent", "RunnerTerminalOpenEvent"), events)
+
+            assertEquals(
+                originalId,
+                RunnerTerminalService.configToTerminal.value[config.id],
+                "a cancelled sidebar rerun must restore the original terminal mapping",
+            )
+            assertTrue(
+                RunnerTerminalService.isConfigRunningInWindow(windowA, config.id),
+                "window A's sidebar tab was never touched and must still read as running",
+            )
+            assertTrue(
+                RunnerTerminalService.isConfigRunningInWindow(windowB, config.id),
+                "the caller's own window must still read as running after its rerun is cancelled",
+            )
+            assertTrue(RunnerTerminalService.isConfigRunning(config.id))
+        }
+
+    /**
+     * BossConsole#486 review round 4, finding 2. `removeTerminal` only cleared `_runningConfigs`
+     * inside the guard that also protects `_configToTerminal` from a newer mapping - so when the
+     * last window for a config disappeared while `_configToTerminal` had already moved to a
+     * replacement that has not opened a window of its own yet, the config stayed in
+     * `_runningConfigs` with no owning window anywhere. `isConfigRunning` then disagreed with
+     * `isConfigRunningInWindow` for every window, with no way to make them agree again short of
+     * a fresh run.
+     *
+     * SIDEBAR_PANEL reaches this without any cancellation: `rerunRunner`'s swap only calls
+     * `removeConfigFromTerminal` for the terminal being replaced when `!usesSidebar`, so a fully
+     * successful sidebar rerun leaves the superseded terminal's own tracking entry in place even
+     * though `_configToTerminal` already points at the replacement - exactly the stale-mapping
+     * shape this guards against.
+     */
+    @Test
+    fun `removeTerminal clears the running flag when the window set empties behind a replacement mapping`() =
+        runBlocking {
+            RunnerSettingsManager.setTerminalTarget(RunnerTerminalTarget.SIDEBAR_PANEL)
+            // No ipcBridge needed: this test asserts on service state, not on the emitted events.
+
+            val originalId = RunnerTerminalService.openRunnerTerminal(config, windowA) {}
+            // Both IDs are minted from System.currentTimeMillis() for the same config.id, so back
+            // to back calls can otherwise collide on a fast machine and produce the identical
+            // string - which would make the "stale" removeTerminal call below legitimately current.
+            delay(5)
+            val replacementId = RunnerTerminalService.rerunRunner(config, windowA) {}
+
+            assertNotEquals(originalId, replacementId)
+            assertEquals(replacementId, RunnerTerminalService.configToTerminal.value[config.id])
+            assertTrue(RunnerTerminalService.isConfigRunning(config.id))
+
+            // A delayed close event for the superseded terminal arrives after the replacement is
+            // already in place. windowA is the only window, so this empties configToWindows for
+            // the config - but configToTerminal no longer names originalId.
+            RunnerTerminalService.removeTerminal(windowA, originalId)
+
+            assertFalse(RunnerTerminalService.isConfigRunningInWindow(windowA, config.id))
+            assertFalse(
+                RunnerTerminalService.isConfigRunning(config.id),
+                "no window owns this config any more, so it must not still read as running",
+            )
+            assertEquals(
+                replacementId,
+                RunnerTerminalService.configToTerminal.value[config.id],
+                "the replacement mapping must survive a stale close for the terminal it replaced",
+            )
         }
 }
