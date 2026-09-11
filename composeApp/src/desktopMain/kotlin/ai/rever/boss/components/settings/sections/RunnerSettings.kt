@@ -107,13 +107,8 @@ fun RunnerSettings() {
                     }
                 },
                 valueRange = MIN_RERUN_DELAY_MS.toFloat()..MAX_RERUN_DELAY_MS.toFloat(),
-                // Derived, not a literal (BossConsole#486 review): a Slider's steps is the count
-                // of dividers *between* the endpoints, so this many steps at this range is one
-                // per RERUN_DELAY_STEP_MS - changing MIN/MAX here alone used to leave the step
-                // size wherever a hardcoded 19 happened to land it (100ms only because 2000/19
-                // rounds there, one of the six divisors of the previous 0..2000 range that
-                // survives ktlint's Int rounding at all).
-                steps = ((MAX_RERUN_DELAY_MS - MIN_RERUN_DELAY_MS) / RERUN_DELAY_STEP_MS - 1).toInt(),
+                // Endpoints add one interval: 19 interior steps gives 2000 / 20 = 100 ms.
+                steps = ((MAX_RERUN_DELAY_MS - MIN_RERUN_DELAY_MS) / RERUN_DELAY_STEP_MS - 1).toInt().coerceAtLeast(0),
                 valueDisplay = { "${it.toInt()} ms" },
                 description = "Delay between Ctrl+C and the new command when re-running in the main panel",
             )

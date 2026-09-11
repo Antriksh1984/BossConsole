@@ -89,7 +89,7 @@ actual object RunnerTerminalService {
         val remaining = terminalToConfigs[terminalId] ?: return
         remaining.remove(configId)
         // Plain remove(terminalId), not a compare-and-swap against `remaining` (BossConsole#486
-        // review): every one of this function's nine call sites already holds stateLock, so there
+        // review): every caller already holds stateLock, so there
         // is no concurrent addConfigToTerminal this could race with between the isEmpty() check
         // and the remove - a two-arg remove(terminalId, remaining) here would compare the map's
         // current value against the very reference just read from it, which is always true and
@@ -361,7 +361,7 @@ actual object RunnerTerminalService {
             }
         }
 
-        if (!rerunStillValid(config, windowId, terminalId)) {
+        if (!rerunStillValid(config, windowId, terminalId, existingTerminalId, existingWindowId)) {
             return terminalId
         }
 
@@ -381,63 +381,42 @@ actual object RunnerTerminalService {
     }
 
     /**
-     * Whether [rerunRunner] may still open [terminalId] for [config] in [windowId] - `false` means
-     * the caller should bail and return [terminalId] unopened.
-     *
-     * Two independent reasons to bail, both about staleness since the teardown above ran:
-     *
-     * **Superseded.** The delay inside the teardown hands the scheduler to whatever else is
-     * runnable - long enough for a concurrent [stopRunner] or a second [rerunRunner] for the same
-     * config to land first and move `_configToTerminal` on. Opening `terminalId` then would track
-     * a tab nothing else agrees exists, and Stop could never close it (the same shape as the
-     * pre-existing race this delay widened from ~0ms to `rerunDelayMs`). Window membership is
-     * checked too, not just the terminal id: [stopRunner] leaves `_configToTerminal` untouched
-     * when the config is still running in *another* window, so a Stop in *this* window during the
-     * delay would otherwise still read as "ours".
-     *
-     * **Caller cancelled.** `withContext(NonCancellable)` above guarantees the interrupt/close
-     * teardown of the terminal being replaced always finishes; it guarantees nothing about what
-     * runs after it returns to a caller cancelled *during* that teardown (a window closing, the
-     * run bar leaving composition) - neither `stateLock.withLock` nor the `RunnerTerminalEventBus`
-     * emit below are suspension points that check cancellation on their own. Reproduced directly:
-     * cancel during the close and the event sequence comes out `[Open, Close, Open]`, not
-     * `[Open, Close]` - a cancelled caller still requesting a replacement. If the config is still
-     * ours when this happens, the old terminal is already gone and the new one is never opened, so
-     * neither exists - the state swapped at the top of [rerunRunner] must not keep pointing at a
-     * `terminalId` nothing will create. [kotlinx.coroutines.ensureActive] rethrows the
-     * cancellation after that rollback, rather than this function returning `false` for it.
-     *
-     * The rollback clears **every** window tracking this config, not only [windowId] - deliberately
-     * unlike [stopRunner], which removes just the calling window and leaves the others alone. The
-     * two differ because they start from different truths: [stopRunner] closes one window's own
-     * terminal and the others' remains live, so clearing only that window is correct. Here there is
-     * only ever one terminal per config, `_configToTerminal[config.id]`, and the interrupt/close
-     * above already tore it down for every window sharing it - "ours" or not, it no longer exists.
-     * Removing only [windowId] left a second window's `isConfigRunningInWindow` reporting `true`
-     * against a `_configToTerminal` entry that had just been deleted, so its Stop button stayed lit
-     * for a terminal `stopRunner` could never find (BossConsole#486 review, round 4).
+     * Reject a replacement superseded during teardown, and roll back a cancelled caller.
+     * Open/close events are window-scoped: several windows can have separate live tabs with
+     * the same terminal ID. Restore the old ID for windows whose tabs were not closed.
+     * Ownership and rollback share one lock; cancellation is sampled once so cleanup and
+     * throwing cannot disagree. A later Stop can still race the subsequent open event.
      */
     private suspend fun rerunStillValid(
         config: RunConfiguration,
         windowId: String,
         terminalId: String,
+        existingTerminalId: String?,
+        existingWindowId: String?,
     ): Boolean {
         val callerContext = currentCoroutineContext()
+        val cancelled = !callerContext.isActive
         val stillOurs =
             stateLock.withLock {
                 val ownsTerminal =
                     _configToTerminal.value[config.id] == terminalId &&
                         _configToWindows.value[config.id]?.contains(windowId) == true
                 // Ownership and rollback must share the lock so a newer run cannot be erased.
-                if (!callerContext.isActive && ownsTerminal) {
-                    _configToTerminal.update { it - config.id }
+                if (cancelled && ownsTerminal) {
                     removeConfigFromTerminal(terminalId, config.id)
-                    _runningConfigs.update { it - config.id }
-                    removeAllWindowsFromConfig(config.id)
+                    removeWindowFromConfig(config.id, existingWindowId ?: windowId)
+                    if (existingTerminalId != null && _configToWindows.value[config.id]?.isNotEmpty() == true) {
+                        _configToTerminal.update { it + (config.id to existingTerminalId) }
+                        addConfigToTerminal(existingTerminalId, config.id)
+                    } else {
+                        _configToTerminal.update { it - config.id }
+                        _runningConfigs.update { it - config.id }
+                        removeAllWindowsFromConfig(config.id)
+                    }
                 }
                 ownsTerminal
             }
-        callerContext.ensureActive()
+        if (cancelled) callerContext.ensureActive()
 
         if (!stillOurs) {
             logger.debug(
@@ -508,14 +487,19 @@ actual object RunnerTerminalService {
         terminalId: String,
     ) {
         stateLock.withLock {
-            val ids = terminalToConfigs.remove(terminalId)?.toSet() ?: emptySet()
+            val ids = terminalToConfigs[terminalId]?.toSet() ?: emptySet()
             if (ids.isNotEmpty()) {
-                _configToTerminal.update { current ->
-                    current.filterKeys { it !in ids }
+                ids.forEach { configId ->
+                    // A delayed close in one window must not erase another window's tab.
+                    removeWindowFromConfig(configId, windowId)
+                    if (_configToWindows.value[configId].isNullOrEmpty()) {
+                        removeConfigFromTerminal(terminalId, configId)
+                        if (_configToTerminal.value[configId] == terminalId) {
+                            _configToTerminal.update { it - configId }
+                            _runningConfigs.update { it - configId }
+                        }
+                    }
                 }
-                _runningConfigs.update { it - ids }
-                // Clean up window mapping
-                ids.forEach { removeAllWindowsFromConfig(it) }
                 logger.debug(
                     LogCategory.TERMINAL,
                     "Terminal removed",

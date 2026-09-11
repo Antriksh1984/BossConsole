@@ -5,6 +5,10 @@ import ai.rever.boss.ipc.IpcEventBridge
 import ai.rever.boss.plugin.run.Language
 import ai.rever.boss.plugin.run.RunConfiguration
 import ai.rever.boss.plugin.run.RunConfigurationType
+import ai.rever.boss.plugin.run.RunnerTerminalCloseEvent
+import ai.rever.boss.plugin.run.RunnerTerminalOpenEvent
+import ai.rever.boss.plugin.run.RunnerTerminalStopEvent
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -12,7 +16,6 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -85,10 +88,11 @@ class DesktopRunnerTerminalServiceTest {
                 }
 
             rerunJob =
-                launch {
+                launch(start = CoroutineStart.LAZY) {
                     RunnerTerminalService.openRunnerTerminal(config, windowId) {}
                     RunnerTerminalService.rerunRunner(config, windowId) {}
                 }
+            rerunJob.start()
             rerunJob.join()
 
             assertTrue(rerunJob.isCancelled)
@@ -104,30 +108,14 @@ class DesktopRunnerTerminalServiceTest {
             )
         }
 
-    /**
-     * BossConsole#486 review, round 4: the rollback above cleared only the cancelling window from
-     * `_configToWindows`, leaving a second window that shared the same config's one terminal
-     * reporting `isConfigRunningInWindow == true` against a `_configToTerminal` entry the rollback
-     * had just deleted - a permanently lit Stop button `stopRunner` can never find a terminal for.
-     *
-     * `openRunnerTerminal` reuses an existing `_configToTerminal[config.id]` entry rather than
-     * minting a second one, so calling it for [windowA] then [windowB] is what puts both windows
-     * on the *same* terminal - exactly how a config already running in one window looks to a
-     * second window that also has it running.
-     */
     @Test
-    fun `cancelling a rerun in one window also stops reporting it running in a second window sharing the terminal`() =
+    fun `cancelled rerun preserves the other window terminal and routes Stop to it`() =
         runBlocking {
             RunnerSettingsManager.setTerminalTarget(RunnerTerminalTarget.MAIN_PANEL)
-
-            RunnerTerminalService.openRunnerTerminal(config, windowA) {}
-            RunnerTerminalService.openRunnerTerminal(config, windowB) {}
-            assertNotNull(
-                RunnerTerminalService.configToTerminal.value[config.id],
-                "sanity: the config should be tracked as running before the rerun under test",
-            )
-
-            lateinit var rerunJob: Job
+            // Model the host's window-scoped open/close routing without creating a live PTY.
+            val liveTabs = mutableSetOf<Pair<String, String>>()
+            val events = mutableListOf<String>()
+            var rerunJob: Job? = null
             RunnerTerminalEventBus.ipcBridge =
                 object : IpcEventBridge {
                     override suspend fun forward(
@@ -135,25 +123,50 @@ class DesktopRunnerTerminalServiceTest {
                         payload: Any,
                         sourceWindowId: String,
                     ) {
-                        if (eventType == "RunnerTerminalCloseEvent") rerunJob.cancel()
+                        events += eventType
+                        when (payload) {
+                            is RunnerTerminalOpenEvent -> {
+                                liveTabs += sourceWindowId to payload.terminalId
+                            }
+
+                            is RunnerTerminalCloseEvent -> {
+                                liveTabs -= sourceWindowId to payload.terminalId
+                                rerunJob?.cancel()
+                            }
+
+                            is RunnerTerminalStopEvent -> {
+                                assertTrue(liveTabs.remove(sourceWindowId to payload.terminalId))
+                            }
+                        }
                     }
                 }
+            val originalId = RunnerTerminalService.openRunnerTerminal(config, windowA) {}
+            RunnerTerminalService.openRunnerTerminal(config, windowB) {}
+            val job = launch(start = CoroutineStart.LAZY) { RunnerTerminalService.rerunRunner(config, windowB) {} }
+            rerunJob = job
+            job.start()
+            job.join()
 
-            rerunJob = launch { RunnerTerminalService.rerunRunner(config, windowB) {} }
-            rerunJob.join()
+            assertTrue(job.isCancelled)
+            assertEquals(
+                listOf("RunnerTerminalOpenEvent", "RunnerTerminalOpenEvent", "RunnerTerminalCloseEvent"),
+                events,
+            )
+            // Existing rerun routing tears down the first registered window (A), not B.
+            assertEquals(setOf(windowB to originalId), liveTabs)
+            RunnerTerminalService.removeTerminal(windowA, originalId)
+            assertEquals(originalId, RunnerTerminalService.configToTerminal.value[config.id])
+            assertFalse(RunnerTerminalService.isConfigRunningInWindow(windowA, config.id))
+            assertTrue(RunnerTerminalService.isConfigRunningInWindow(windowB, config.id))
+            assertTrue(RunnerTerminalService.isConfigRunning(config.id))
+            assertEquals(config.id, RunnerTerminalService.getConfigForTerminal(originalId))
 
-            assertTrue(rerunJob.isCancelled)
-            assertNull(
-                RunnerTerminalService.configToTerminal.value[config.id],
-                "the shared terminal was torn down by the cancelled rerun and never replaced",
-            )
-            assertFalse(
-                RunnerTerminalService.isConfigRunningInWindow(windowA, config.id),
-                "window A must not still claim the config is running once the terminal it shared is gone",
-            )
-            assertFalse(
-                RunnerTerminalService.isConfigRunningInWindow(windowB, config.id),
-                "window B (the one that cancelled) must not claim the config is running either",
-            )
+            // No provider is registered, so closeActiveTab returns false; verify Stop's actual
+            // window/terminal event and tracking cleanup rather than claiming a live PTY closed.
+            RunnerTerminalService.stopRunner(windowB, config.id)
+            assertEquals("RunnerTerminalStopEvent", events.last())
+            assertTrue(liveTabs.isEmpty())
+            assertFalse(RunnerTerminalService.isConfigRunning(config.id))
+            assertNull(RunnerTerminalService.configToTerminal.value[config.id])
         }
 }
