@@ -1,5 +1,15 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert"
-import { completion, events, Model, requestBody, StreamAdapter, usage } from "../wire.ts"
+import {
+  completion,
+  endpoint,
+  events,
+  Model,
+  readJson,
+  requestBody,
+  StreamAdapter,
+  usage,
+} from "../wire.ts"
+import { bearer, HttpError } from "../auth.ts"
 
 const model: Model = {
   id: "boss-test",
@@ -160,4 +170,103 @@ Deno.test("Responses stream maps sparse output indexes to contiguous tool indexe
   assertThrows(() =>
     new StreamAdapter(model.id, "openai_chat", "r").accept('{"error":{"message":"private prompt"}}')
   )
+})
+
+Deno.test("vision-enabled models accept inline images but refuse remote images and extensions", () => {
+  const vision = { ...model, capabilities: [...model.capabilities, "vision"] }
+  const image = (url: string, extra = {}) => ({
+    ...input,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url, detail: "low", ...extra } },
+      ],
+    }],
+  })
+  for (const type of ["openai_chat", "openai_responses"] as const) {
+    requestBody(image("data:image/png;base64,YQ=="), vision, type)
+    assertThrows(() => requestBody(image("https://example.com/private"), vision, type))
+    assertThrows(() =>
+      requestBody(image("data:image/png;base64,YQ==", { provider: "x" }), vision, type)
+    )
+    assertThrows(() =>
+      requestBody(image("data:image/png;base64,YQ==", { detail: "invalid" }), vision, type)
+    )
+  }
+})
+
+Deno.test("function and format envelopes reject vendor extensions", () => {
+  assertThrows(() =>
+    requestBody(
+      {
+        ...input,
+        tools: [{
+          type: "function",
+          function: {
+            name: "lookup",
+            provider: "override",
+          },
+        }],
+      },
+      model,
+      "openai_chat",
+    )
+  )
+  assertThrows(() =>
+    requestBody(
+      {
+        ...input,
+        response_format: {
+          type: "json_object",
+          endpoint: "https://attacker",
+        },
+      },
+      model,
+      "openai_chat",
+    )
+  )
+})
+
+Deno.test("upstream endpoints and bearer headers fail closed", () => {
+  const connection = {
+    base_url: "https://example.com/v1",
+    api_type: "openai_chat" as const,
+    api_key_secret: "BOSS_AI_TEST",
+  }
+  for (
+    const url of [
+      "http://example.com",
+      "https://u:p@example.com",
+      "https://example.com?key=x",
+      "https://example.com#x",
+    ]
+  ) {
+    assertThrows(() => endpoint({ ...connection, base_url: url }))
+  }
+  for (const value of ["Basic x", "Bearer ", `Bearer ${"x".repeat(16385)}`]) {
+    assertThrows(() =>
+      bearer(new Request("https://example.com", { headers: { authorization: value } }))
+    )
+  }
+})
+
+Deno.test("bounded JSON reads reject oversized bodies", async () => {
+  const error = await assertRejects(
+    () => readJson(new Response('{"data":"large"}').body, 4),
+    HttpError,
+  )
+  assertEquals(error.status, 413)
+})
+
+Deno.test("all stream frames carry a stable created timestamp", () => {
+  for (const type of ["openai_chat", "openai_responses"] as const) {
+    const adapter = new StreamAdapter(model.id, type, "request")
+    const event = type === "openai_chat"
+      ? { choices: [{ delta: { content: "hello" } }] }
+      : { type: "response.output_text.delta", delta: "hello" }
+    const first = adapter.accept(JSON.stringify(event))[0]
+    const second = adapter.accept(JSON.stringify(event))[0]
+    assertEquals(typeof first.created, "number")
+    assertEquals(first.created, second.created)
+  }
 })

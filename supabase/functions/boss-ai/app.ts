@@ -16,24 +16,35 @@ export interface Dependencies {
   rpc(name: string, params: Obj): Promise<unknown>
   secret(name: string): string | undefined
   fetch: typeof fetch
+  upstreamTimeoutMs?: number
+  audit?: (event: string, requestId: string) => void
 }
 const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" }
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers })
-function failure(error: unknown): Response {
+const json = (body: unknown, status = 200, requestId = "") =>
+  new Response(JSON.stringify(body), { status, headers: { ...headers, "X-Request-ID": requestId } })
+function failure(error: unknown, requestId: string): Response {
   const e = error instanceof HttpError
     ? error
     : new HttpError(503, "unavailable", "BOSS AI is temporarily unavailable.")
-  return json({ error: { code: e.code, message: e.message } }, e.status)
+  return json({ error: { code: e.code, message: e.message } }, e.status, requestId)
 }
 
 export function createHandler(deps: Dependencies): (request: Request) => Promise<Response> {
   return async (request) => {
+    const requestId = crypto.randomUUID()
+    const audit = (event: string) => {
+      try {
+        if (deps.audit) deps.audit(event, requestId)
+        else console.warn(JSON.stringify({ event, request_id: requestId }))
+      } catch { /* Observability must not change accounting or response cleanup. */ }
+    }
     let reservation: string | undefined
     let dispatched = false
+    let measuredTokens: number | null = null
+    let phase = "authentication"
     try {
       const path = new URL(request.url).pathname.replace(/^\/functions\/v1/, "").replace(
-        /^\/boss-ai/,
+        /^\/boss-ai(?=\/|$)/,
         "",
       )
       const token = bearer(request)
@@ -41,12 +52,22 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (request.method === "POST" && path === "/auth/token") {
         const user = await deps.sessionUser(token)
         if (!user) throw new HttpError(401, "unauthorized", "Sign in to BOSS to use AI.")
-        return json(await mintToken(user, key))
+        return json(await mintToken(user, key), 200, requestId)
       }
       const user = await verifyToken(token, key)
-      if (request.method === "GET" && (path === "/v1/models" || path === "/usage")) {
+      if (request.method === "GET" && (path === "/v1/models" || path === "/v1/usage")) {
+        phase = "catalog"
         const data = await deps.rpc("boss_ai_catalog", { p_user_id: user })
-        return json({ object: "list", data })
+        return json(
+          {
+            object: "list",
+            data: path === "/v1/models"
+              ? data
+              : (data as Obj[]).map((model) => ({ model: model.id, allowance: model.allowance })),
+          },
+          200,
+          requestId,
+        )
       }
       if (request.method !== "POST" || path !== "/v1/chat/completions") {
         throw new HttpError(404, "not_found", "Unknown BOSS AI endpoint.")
@@ -55,7 +76,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (typeof input.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(input.model)) {
         throw new HttpError(400, "invalid_model", "Choose a published BOSS model.")
       }
-      const requestId = crypto.randomUUID()
+      phase = "reservation"
       const result = await deps.rpc("boss_ai_reserve", {
         p_user_id: user,
         p_model_id: input.model,
@@ -85,13 +106,17 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       const cancel = () => abort.abort()
       request.signal.addEventListener("abort", cancel, { once: true })
       if (request.signal.aborted) abort.abort()
-      const timeout = setTimeout(cancel, 240_000)
+      const timeout = setTimeout(cancel, deps.upstreamTimeoutMs ?? 240_000)
       const cleanup = () => {
         clearTimeout(timeout)
         request.signal.removeEventListener("abort", cancel)
       }
       let upstream: Response
       try {
+        if (abort.signal.aborted) {
+          throw new HttpError(499, "cancelled", "The AI request was cancelled.")
+        }
+        phase = "upstream_dispatch"
         dispatched = true
         upstream = await deps.fetch(url, {
           method: "POST",
@@ -107,8 +132,12 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (!upstream.ok) {
         await upstream.body?.cancel()
         cleanup()
-        // A rejected request with a known 4xx response performed no inference.
-        if ([400, 401, 403, 404, 422, 429].includes(upstream.status)) dispatched = false
+        // Known validation/auth/billing rejections can be refunded. A timeout or 5xx
+        // does not prove inference did not run (a proxy can fail after forwarding).
+        if ([400, 401, 402, 403, 404, 405, 406, 413, 415, 422, 429].includes(upstream.status)) {
+          dispatched = false
+        }
+        audit(`upstream_status_${upstream.status}`)
         throw new HttpError(
           upstream.status === 429 ? 503 : 502,
           "upstream_error",
@@ -116,20 +145,30 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         )
       }
       const settle = async (tokens: number | null) => {
+        if (tokens === null) audit("usage_unknown_reservation_retained")
+        if (tokens !== null && tokens > result.model.context_length) {
+          audit("usage_exceeds_configured_context")
+        }
+        phase = "settlement"
         await deps.rpc("boss_ai_settle", { p_request_id: requestId, p_tokens: tokens })
       }
       if (input.stream !== true) {
         try {
+          phase = "upstream_response"
+          const payload = await readJson(upstream.body, 16 * 1024 * 1024).catch(() => {
+            throw new HttpError(502, "upstream_error", "The model returned an invalid response.")
+          })
           const output = completion(
-            await readJson(upstream.body, 16 * 1024 * 1024),
+            payload,
             input.model,
             result.connection.api_type,
             requestId,
           )
           const tokens = (output.usage as Obj | null)?.total_tokens
-          await settle(typeof tokens === "number" ? tokens : null)
+          measuredTokens = typeof tokens === "number" ? tokens : null
+          await settle(measuredTokens)
           reservation = undefined
-          return json(output)
+          return json(output, 200, requestId)
         } finally {
           cleanup()
         }
@@ -139,11 +178,12 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         throw new Error("Missing stream")
       }
       const adapter = new StreamAdapter(input.model, result.connection.api_type, requestId)
-      const iterator = events(upstream.body)[Symbol.asyncIterator]()
+      const iterator = events(upstream.body, abort.signal)[Symbol.asyncIterator]()
       const encoder = new TextEncoder()
       const frame = (data: unknown) =>
         encoder.encode(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`)
       let closed = false
+      let clientCancelled = false
       const finish = async (tokens: number | null) => {
         if (closed) return
         closed = true
@@ -152,7 +192,9 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         await iterator.return?.(undefined).catch(() => {})
         // If settlement fails the full reservation remains charged. Never refund
         // an unknown outcome merely because a worker or a client disconnected.
-        await settle(tokens).catch(() => console.error("boss-ai settlement failed", requestId))
+        await settle(tokens).catch(async () => {
+          await settle(tokens).catch(() => audit("settlement_failed"))
+        })
       }
       reservation = undefined // The stream now owns cleanup and settlement.
       const stream = new ReadableStream<Uint8Array>({
@@ -173,7 +215,9 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
               controller.close()
             }
           } catch {
+            audit("stream_failed")
             await finish(null)
+            if (clientCancelled) return
             controller.enqueue(
               frame({
                 error: {
@@ -186,6 +230,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
           }
         },
         async cancel() {
+          clientCancelled = true
           await finish(null)
         },
       })
@@ -197,14 +242,16 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         },
       })
     } catch (error) {
+      if (!(error instanceof HttpError) || error.status >= 500) audit(`${phase}_failed`)
       if (reservation) {
+        if (dispatched && measuredTokens === null) audit("usage_unknown_reservation_retained")
         await deps.rpc("boss_ai_settle", {
           p_request_id: reservation,
-          p_tokens: dispatched ? null : 0,
+          p_tokens: dispatched ? measuredTokens : 0,
         })
-          .catch(() => console.error("boss-ai settlement failed", reservation))
+          .catch(() => audit("settlement_failed"))
       }
-      return failure(error)
+      return failure(error, requestId)
     }
   }
 }

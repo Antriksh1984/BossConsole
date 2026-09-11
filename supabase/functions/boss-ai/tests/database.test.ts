@@ -23,6 +23,11 @@ Deno.test("database policy, reservations, settlement, revocation and grants", as
         new URL("../../../migrations/20260912000000_boss_ai.sql", import.meta.url),
       ),
     )
+    await db.exec(
+      await Deno.readTextFile(
+        new URL("../../../migrations/20260912001000_boss_ai_hardening.sql", import.meta.url),
+      ),
+    )
     const user = "00000000-0000-0000-0000-000000000001"
     const other = "00000000-0000-0000-0000-000000000002"
     await db.exec(`

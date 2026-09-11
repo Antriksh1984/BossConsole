@@ -25,6 +25,21 @@ export function invalid(): HttpError {
   )
 }
 
+function onlyKeys(value: Obj, keys: string[]) {
+  if (Object.keys(value).some((key) => !keys.includes(key))) throw invalid()
+}
+
+function functionCall(value: unknown): Obj {
+  const call = object(value), f = object(call.function)
+  onlyKeys(call, ["id", "type", "function"])
+  onlyKeys(f, ["name", "arguments"])
+  if (
+    call.type !== "function" || typeof call.id !== "string" ||
+    typeof f.name !== "string" || typeof f.arguments !== "string"
+  ) throw invalid()
+  return call
+}
+
 // Bounded reads apply even when Content-Length is absent or false.
 export async function readJson(
   body: ReadableStream<Uint8Array> | null,
@@ -62,6 +77,12 @@ export async function readJson(
 }
 
 export function endpoint(connection: Connection): string {
+  if (
+    !/^BOSS_AI_[A-Z0-9_]+$/.test(connection.api_key_secret) ||
+    connection.api_key_secret === "BOSS_AI_SIGNING_SECRET"
+  ) {
+    throw new HttpError(503, "configuration", "BOSS AI is temporarily unavailable.")
+  }
   const url = new URL(connection.base_url)
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
     throw new HttpError(503, "configuration", "BOSS AI is temporarily unavailable.")
@@ -104,9 +125,17 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       if (!Array.isArray(m.content)) throw invalid()
       for (const part of m.content) {
         const p = object(part)
-        if (p.type === "text" && typeof p.text === "string") continue
+        if (p.type === "text" && typeof p.text === "string") {
+          onlyKeys(p, ["type", "text"])
+          continue
+        }
         if (p.type === "image_url" && model.capabilities.includes("vision")) {
+          onlyKeys(p, ["type", "image_url"])
           const image = object(p.image_url)
+          onlyKeys(image, ["url", "detail"])
+          if (
+            image.detail !== undefined && !["auto", "low", "high"].includes(String(image.detail))
+          ) throw invalid()
           if (
             typeof image.url === "string" &&
             /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image.url)
@@ -123,6 +152,7 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       m.tool_calls !== undefined &&
       (!Array.isArray(m.tool_calls) || !model.capabilities.includes("tools"))
     ) throw invalid()
+    if (Array.isArray(m.tool_calls)) m.tool_calls.forEach(functionCall)
     return m
   })
   const max = input.max_completion_tokens ?? input.max_tokens ??
@@ -146,6 +176,11 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
     tools = input.tools.map((value) => {
       const t = object(value)
       const f = object(t.function)
+      onlyKeys(t, ["type", "function"])
+      onlyKeys(f, ["name", "description", "parameters", "strict"])
+      if (f.description !== undefined && typeof f.description !== "string") throw invalid()
+      if (f.strict !== undefined && typeof f.strict !== "boolean") throw invalid()
+      if (f.parameters !== undefined) object(f.parameters)
       if (
         t.type !== "function" || typeof f.name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(f.name)
       ) throw invalid()
@@ -161,6 +196,8 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       common.tool_choice = choice
     } else {
       const c = object(choice), f = object(c.function)
+      onlyKeys(c, ["type", "function"])
+      onlyKeys(f, ["name"])
       if (c.type !== "function" || typeof f.name !== "string") throw invalid()
       common.tool_choice = type === "openai_chat" ? c : { type: "function", name: f.name }
     }
@@ -172,7 +209,18 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
   if (input.response_format !== undefined) {
     if (!model.capabilities.includes("structured_output")) throw invalid()
     const format = object(input.response_format)
+    onlyKeys(format, ["type", "json_schema"])
     if (!["json_schema", "json_object", "text"].includes(String(format.type))) throw invalid()
+    if (format.type === "json_schema") {
+      const schema = object(format.json_schema)
+      onlyKeys(schema, ["name", "description", "schema", "strict"])
+      if (
+        typeof schema.name !== "string" ||
+        (schema.description !== undefined && typeof schema.description !== "string") ||
+        (schema.strict !== undefined && typeof schema.strict !== "boolean")
+      ) throw invalid()
+      object(schema.schema)
+    }
     if (type === "openai_chat") common.response_format = format
     else {common.text = {
         format: format.type === "json_schema"
@@ -222,7 +270,7 @@ export function usage(value: unknown, responses = false): Obj | null {
   const completion = u[responses ? "output_tokens" : "completion_tokens"]
   if (
     !Number.isSafeInteger(prompt) || !Number.isSafeInteger(completion) || Number(prompt) < 0 ||
-    Number(completion) < 0
+    Number(completion) < 0 || !Number.isSafeInteger(Number(prompt) + Number(completion))
   ) return null
   return {
     prompt_tokens: prompt,
@@ -237,14 +285,31 @@ export function completion(
   type: Connection["api_type"],
   id: string,
 ): Obj {
+  try {
+    return decodeCompletion(value, model, type, id)
+  } catch {
+    // Every decoding failure here belongs to the upstream, never to the caller.
+    throw new HttpError(502, "upstream_error", "The model returned an invalid response.")
+  }
+}
+
+function decodeCompletion(
+  value: Obj,
+  model: string,
+  type: Connection["api_type"],
+  id: string,
+): Obj {
   if (value.error) {
     throw new HttpError(502, "upstream_error", "The model could not complete this request.")
   }
   if (type === "openai_chat") {
-    if (!Array.isArray(value.choices) || value.choices.length !== 1) throw invalid()
+    if (!Array.isArray(value.choices) || value.choices.length !== 1) {
+      throw new HttpError(502, "upstream_error", "The model returned an invalid response.")
+    }
     return {
       id,
       object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
       model,
       choices: value.choices,
       usage: usage(value.usage),
@@ -266,10 +331,15 @@ export function completion(
   return {
     id,
     object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
     model,
     choices: [{
       index: 0,
-      message: { role: "assistant", content: text, ...(calls.length ? { tool_calls: calls } : {}) },
+      message: {
+        role: "assistant",
+        content: text || null,
+        ...(calls.length ? { tool_calls: calls } : {}),
+      },
       finish_reason: value.status === "incomplete"
         ? "length"
         : calls.length
@@ -281,8 +351,16 @@ export function completion(
 }
 
 // SSE frames can split anywhere, including within UTF-8 characters and CRLF pairs.
-export async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+export async function* events(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<string> {
   const reader = body.pipeThrough(new TextDecoderStream()).getReader()
+  const cancel = () => {
+    void reader.cancel().catch(() => {})
+  }
+  signal?.addEventListener("abort", cancel, { once: true })
+  if (signal?.aborted) cancel()
   let buffer = ""
   try {
     while (true) {
@@ -301,8 +379,12 @@ export async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<
         if (data) yield data
       }
     }
-    if (buffer.trim()) throw new Error("Truncated frame")
+    // Comments contain no application data and need not turn a completed stream into an error.
+    if (buffer.split(/\r?\n/).some((line) => line.trim() && !line.startsWith(":"))) {
+      throw new Error("Truncated frame")
+    }
   } finally {
+    signal?.removeEventListener("abort", cancel)
     await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
@@ -312,13 +394,15 @@ export class StreamAdapter {
   finished = false
   tokens: number | null = null
   private toolIndexes = new Map<number, number>()
+  private created = Math.floor(Date.now() / 1000)
   constructor(private model: string, private type: Connection["api_type"], private id: string) {}
   private chunk(delta: Obj, finish: string | null = null): Obj {
     return {
       id: this.id,
       object: "chat.completion.chunk",
+      created: this.created,
       model: this.model,
-      choices: [{ index: 0, delta, finish_reason: finish }],
+      choices: [{ index: 0, delta: { role: "assistant", ...delta }, finish_reason: finish }],
     }
   }
   accept(data: string): Obj[] {
@@ -336,6 +420,7 @@ export class StreamAdapter {
       return [{
         id: this.id,
         object: "chat.completion.chunk",
+        created: this.created,
         model: this.model,
         choices: e.choices ?? [],
         ...(u ? { usage: u } : {}),
@@ -377,7 +462,14 @@ export class StreamAdapter {
             ? "tool_calls"
             : "stop",
         ),
-        { id: this.id, object: "chat.completion.chunk", model: this.model, choices: [], usage: u },
+        {
+          id: this.id,
+          object: "chat.completion.chunk",
+          created: this.created,
+          model: this.model,
+          choices: [],
+          usage: u,
+        },
       ]
     }
     return []
