@@ -1,14 +1,15 @@
 package ai.rever.boss.components.plugin.providers
 
 import ai.rever.boss.components.plugin.panels.left_top.ProjectState
-import ai.rever.boss.plugin.api.ProjectChangeEvent
 import ai.rever.boss.plugin.api.ProjectData
 import ai.rever.boss.plugin.api.ProjectDataProvider
 import ai.rever.boss.window.Project
 import ai.rever.boss.window.WindowProjectState
 import ai.rever.boss.window.selectProjectInWindow
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,17 +22,26 @@ import kotlinx.coroutines.launch
  *
  * Built per window ([DefaultPlugin]'s `projectDataProviderDelegate`), but [scope]'s collector
  * subscribes to [ProjectState.recentProjects] - a process-wide singleton, not this window's own
- * state - so it outlives the window unless [dispose] cancels it (BossConsole#520). Because the
- * collector target is process-wide, [ai.rever.boss.kernel.services.ProjectDataServiceBridge]
- * deliberately does NOT read [recentProjects] here: a KERNEL client watching it would freeze at
- * whatever this instance last saw the moment its window's [dispose] runs. That bridge reads
- * [ProjectState.recentProjects] directly instead, which is what makes disposing this safe.
+ * state - so it outlives the window unless [dispose] cancels it (BossConsole#520).
+ *
+ * [dispose] is safe even in KERNEL mode, where the instance is also handed to the
+ * process-wide [ai.rever.boss.kernel.services.ProjectDataServiceBridge]: that bridge reads
+ * [ProjectState.recentProjects] directly rather than this per-window [recentProjects] mirror,
+ * so cancelling the mirror at window close cannot freeze a KERNEL client's stream.
  */
 class ProjectDataProviderImpl(
     private val windowProjectState: WindowProjectState?,
+    // Injectable purely for tests. Dispatchers.Main has no implementation in a plain test JVM, so
+    // a hard-coded one forces every test that builds this to install a global Main dispatcher.
+    // Passing Dispatchers.Unconfined keeps any test-built collector inert and local.
+    dispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : ProjectDataProvider,
     DisposableProvider {
-    private val scope = CoroutineScope(Dispatchers.Main)
+    // SupervisorJob, matching DefaultPlugin.pluginScope. There is one collector today, so this
+    // is future-proofing rather than a fix: with a plain Job a second one added later would be
+    // its sibling, and a failure in either would cancel the scope and take the other with it -
+    // silently, since nothing awaits them.
+    private val scope = CoroutineScope(dispatcher + SupervisorJob())
 
     // Map ProjectState's recentProjects to plugin's ProjectData type
     private val _recentProjects = MutableStateFlow<List<ProjectData>>(emptyList())
@@ -54,16 +64,14 @@ class ProjectDataProviderImpl(
         ProjectState.removeRecentProject(projectPath)
     }
 
+    // No ProjectChangeEvent here. This is the plugin-initiated path and it was the ONLY one that
+    // published, which is why the startup restore - WorkspaceApplier calling
+    // windowProjectState.selectProject directly - announced nothing and panels built before it
+    // stayed empty for the session. The publish now happens where every caller ends up, in the
+    // ProjectSelectionCallback that WindowProjectStateRegistry installs on the state itself;
+    // see ProjectChangeAnnouncer. Publishing here too would double-fire on this path.
     override fun selectProject(project: ProjectData) {
-        val previousPath = windowProjectState?.selectedProject?.value?.path
         selectProjectInWindow(windowProjectState, project.toProject())
-        publishSystemEvent(
-            ProjectChangeEvent(
-                projectPath = project.path,
-                previousProjectPath = previousPath,
-                windowId = windowProjectState?.windowId ?: "",
-            ),
-        )
     }
 
     /** Stops mirroring [ProjectState.recentProjects] into [recentProjects]. See the class KDoc. */
