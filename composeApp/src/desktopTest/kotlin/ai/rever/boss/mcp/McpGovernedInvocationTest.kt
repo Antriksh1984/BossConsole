@@ -12,6 +12,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Exercises policy precedence, real approval suspension and audit cancellation at the registry boundary. */
@@ -453,6 +454,66 @@ class McpGovernedInvocationTest {
             val request = approvalBus.pendingList.first { it.isNotEmpty() }.first()
             approvalBus.deny(request.id)
             assertTrue(job.await().isError)
+        }
+
+    @Test
+    fun `trustProvider on a dialog left stale by a revoke does not run the call or persist a grant`() =
+        runBlocking {
+            // BossConsole#542 review: a queued approval must not be able to persist a
+            // provider-wide grant a reset already invalidated (AGENTS.md's governed-MCP
+            // section - "each reset invalidates older authorizations before their final
+            // approval boundary, including queued once/session/persistent grants").
+            var called = false
+            val policyEngine = McpPolicyEngine(policyFile = null)
+            val approvalBus = McpApprovalBus(defaultTimeoutMs = 5000L)
+            val ledger = McpOperationLedger(ledgerFile = null)
+            val core =
+                McpToolRegistryCore(
+                    disabledFile = null,
+                    policyEngine = policyEngine,
+                    approvalBus = approvalBus,
+                    ledger = ledger,
+                )
+            core.registerProvider(
+                provider(
+                    "terminal-tab",
+                    echoTool(
+                        "run_command",
+                        handler =
+                            McpToolHandler {
+                                called = true
+                                McpToolResult("ran")
+                            },
+                    ),
+                ),
+            )
+
+            // The prompt opens and captures the current revocation.
+            val call = async { core.invoke("run_command", "{}") }
+            val request = approvalBus.pendingList.first { it.isNotEmpty() }.first()
+
+            // The operator resets this tool from "Persisted MCP policies" while the dialog is
+            // still open - bumps the revocation the pending request already captured.
+            policyEngine.revokePersistedPolicy("run_command")
+
+            // Clicking "Trust This Plugin" on the now-stale dialog must not run the call and
+            // must not persist the provider-wide grant the reset was supposed to invalidate -
+            // unlike a genuine disk-write failure (PROVIDER_TRUST_PERSIST_FAILED), which still
+            // runs the call.
+            approvalBus.approve(request.id, trustProvider = true)
+            assertTrue(call.await().isError)
+            assertFalse(called, "a call cancelled out from under a stale dialog must never execute")
+            assertEquals(
+                McpApprovalDisposition.POLICY_DENIED,
+                ledger.recentOperations.value
+                    .single()
+                    .approvalDisposition,
+            )
+            assertNull(
+                policyEngine.config.value.providerRules["terminal-tab"],
+                "the reset must not have been overwritten by the stale approval",
+            )
+            assertEquals(McpPolicyAction.ASK, policyEngine.policyFor("run_command", "terminal-tab"))
         }
 
     // A registry wired to a policy file whose parent path is a file, so the atomic

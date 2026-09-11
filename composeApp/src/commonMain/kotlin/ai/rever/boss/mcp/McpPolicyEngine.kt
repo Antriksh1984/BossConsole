@@ -253,12 +253,29 @@ class McpPolicyEngine(
      * Trust every tool [providerId] contributes, persistently - "Trust this plugin" in the
      * approval dialog, for an operator who does not want to approve each of its tools one at a
      * time. Weaker than an explicit tool-specific rule: see [policyFor].
+     *
+     * [preserveDeny]/[expectedRevocation]/[toolName] mirror [setToolPolicy]'s own guards: a
+     * queued "Trust This Plugin" click is answering for the *tool* that prompted it, so its
+     * write must recheck that tool's revocation/DENY state under this same lock, not only at
+     * the caller's pre-check - otherwise a reset landing between the pre-check and the write
+     * (BossConsole#542 review) persists a provider-wide grant the reset was supposed to
+     * invalidate. All three are optional because this is also called with no tool in mind
+     * (tests, and any future non-approval-flow caller).
      */
     fun setProviderPolicy(
         providerId: String,
         action: McpPolicyAction,
+        preserveDeny: Boolean = false,
+        expectedRevocation: Long? = null,
+        toolName: String? = null,
     ): Boolean =
         synchronized(lock) {
+            if (expectedRevocation != null && toolName != null && revocationVersion(toolName) != expectedRevocation) {
+                return@synchronized false
+            }
+            if (preserveDeny && toolName != null && policyFor(toolName, providerId) == McpPolicyAction.DENY) {
+                return@synchronized false
+            }
             applyConfig(
                 key = providerId,
                 logKey = "provider",
