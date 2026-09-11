@@ -38,6 +38,29 @@ class ExecutableDownloadConsentTest {
     }
 
     @Test
+    fun `the download handler reads the live BrowserSettings toggle, not a cached copy`() {
+        // FluckEngine passes BrowserSettings.warnForExecutables at the call site rather than a
+        // value captured earlier, so a Settings > Browser > Downloads change applies to the very
+        // next download with no restart. This pins that call-site shape rather than a snapshot.
+        val original = BrowserSettings.warnForExecutables
+        try {
+            BrowserSettings.warnForExecutables = false
+            assertTrue(
+                executableDownloadAllowed(BrowserSettings.warnForExecutables, "setup.exe", "setup.exe") {
+                    error("disabled warning must not prompt")
+                },
+            )
+
+            BrowserSettings.warnForExecutables = true
+            assertFalse(
+                executableDownloadAllowed(BrowserSettings.warnForExecutables, "setup.exe", "setup.exe") { false },
+            )
+        } finally {
+            BrowserSettings.warnForExecutables = original
+        }
+    }
+
+    @Test
     fun `declining releases the owned path and URL before cancelling exactly once`() {
         val directory = Files.createTempDirectory("download-consent").toFile()
         val owner = "declined-download"
