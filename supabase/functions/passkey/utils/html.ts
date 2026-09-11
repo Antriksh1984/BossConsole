@@ -41,14 +41,26 @@ function escapeJsString(value: string): string {
 }
 
 /**
- * Every template value is substituted with a *function* replacement
- * (`() => value`) below rather than a plain string: `String.prototype.replace`
- * applies `$`-pattern expansion (`$$`, `$&`, `` $` ``, `$'`) to the replacement
- * string, and that happens *after* escaping. A sessionId of `$&` would echo the
- * raw placeholder back into the page, and `` $` `` would splice the entire
- * pre-match document into the string literal and kill the inline script. The
- * function form returns the escaped value verbatim.
+ * Substitutes every `{{PLACEHOLDER}}` in one pass. Two properties matter:
+ *
+ * - **Function-form replacement.** `String.prototype.replace` applies
+ *   `$`-pattern expansion (`$$`, `$&`, `$` + backtick, `$'`) to *string*
+ *   replacements, and that happens *after* escaping: a sessionId of `$&`
+ *   would echo the raw placeholder back into the page, and a `$` + backtick
+ *   payload would splice the entire pre-match document into the string
+ *   literal and kill the inline script. A function replacement returns the
+ *   escaped value verbatim.
+ * - **One pass.** Sequential per-placeholder replaces would expand a value
+ *   that literally contains a *later* placeholder name (e.g. a sessionId of
+ *   `{{ANON_KEY_JS}}` would render the anon key into it). Scanning the
+ *   original template once means substituted values are never re-read.
+ *
+ * A placeholder absent from the map is left verbatim, the same failure mode
+ * as a missing per-placeholder replace.
  */
+function renderTemplate(template: string, values: Record<string, string>): string {
+  return template.replace(/{{(\w+)}}/g, (match, key) => (Object.hasOwn(values, key) ? values[key] : match))
+}
 
 const REGISTRATION_TEMPLATE = `<!DOCTYPE html>
 <html lang="en">
@@ -1147,15 +1159,16 @@ export async function getMobileRegistrationHTML(
 ): Promise<string> {
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
 
-  return REGISTRATION_TEMPLATE
-    .replace(/{{EMAIL_HTML}}/g, () => escapeHtml(email))
-    .replace(/{{CHALLENGE_JS}}/g, () => escapeJsString(challenge))
-    .replace(/{{USER_ID_JS}}/g, () => escapeJsString(userId))
-    .replace(/{{EMAIL_JS}}/g, () => escapeJsString(email))
-    .replace(/{{SESSION_ID_JS}}/g, () => escapeJsString(sessionId))
-    .replace(/{{RP_ID_JS}}/g, () => escapeJsString(rpId))
-    .replace(/{{RP_NAME_JS}}/g, () => escapeJsString(rpName))
-    .replace(/{{ANON_KEY_JS}}/g, () => escapeJsString(anonKey));
+  return renderTemplate(REGISTRATION_TEMPLATE, {
+    EMAIL_HTML: escapeHtml(email),
+    CHALLENGE_JS: escapeJsString(challenge),
+    USER_ID_JS: escapeJsString(userId),
+    EMAIL_JS: escapeJsString(email),
+    SESSION_ID_JS: escapeJsString(sessionId),
+    RP_ID_JS: escapeJsString(rpId),
+    RP_NAME_JS: escapeJsString(rpName),
+    ANON_KEY_JS: escapeJsString(anonKey),
+  })
 }
 
 export async function getMobileAuthenticationHTML(
@@ -1170,18 +1183,21 @@ export async function getMobileAuthenticationHTML(
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
   const createdAtFormatted = new Date(credentialCreatedAt).toLocaleDateString();
 
-  return AUTHENTICATION_TEMPLATE
-    .replace(/{{EMAIL_HTML}}/g, () => escapeHtml(email))
-    .replace(/{{CREDENTIAL_DISPLAY_NAME_HTML}}/g, () => escapeHtml(credentialDisplayName))
-    .replace(/{{CREDENTIAL_CREATED_AT_HTML}}/g, () => escapeHtml(createdAtFormatted))
-    .replace(/{{CHALLENGE_JS}}/g, () => escapeJsString(challenge))
-    .replace(/{{EMAIL_JS}}/g, () => escapeJsString(email))
-    .replace(/{{SESSION_ID_JS}}/g, () => escapeJsString(sessionId))
-    .replace(/{{RP_ID_JS}}/g, () => escapeJsString(rpId))
-    .replace(/{{CREDENTIAL_ID_JS}}/g, () => escapeJsString(credentialId))
-    .replace(/{{ANON_KEY_JS}}/g, () => escapeJsString(anonKey));
+  return renderTemplate(AUTHENTICATION_TEMPLATE, {
+    EMAIL_HTML: escapeHtml(email),
+    CREDENTIAL_DISPLAY_NAME_HTML: escapeHtml(credentialDisplayName),
+    CREDENTIAL_CREATED_AT_HTML: escapeHtml(createdAtFormatted),
+    CHALLENGE_JS: escapeJsString(challenge),
+    EMAIL_JS: escapeJsString(email),
+    SESSION_ID_JS: escapeJsString(sessionId),
+    RP_ID_JS: escapeJsString(rpId),
+    CREDENTIAL_ID_JS: escapeJsString(credentialId),
+    ANON_KEY_JS: escapeJsString(anonKey),
+  })
 }
 
 export async function getMobileErrorHTML(message: string): Promise<string> {
-  return ERROR_TEMPLATE.replace(/{{MESSAGE_HTML}}/g, () => escapeHtml(message));
+  return renderTemplate(ERROR_TEMPLATE, {
+    MESSAGE_HTML: escapeHtml(message),
+  })
 }
