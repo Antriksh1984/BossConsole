@@ -745,7 +745,7 @@ internal class McpToolRegistryCore(
                 ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
         val args = parseArgs(arguments)
         val revocation = policyEngine.revocationVersion(toolName)
-        val policy = policyEngine.policyFor(toolName)
+        val policy = policyEngine.policyFor(toolName, tool.providerId)
         val startTime = System.nanoTime()
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
         var result: McpToolResult? = null
@@ -813,7 +813,8 @@ internal class McpToolRegistryCore(
                 policyEngine.confirmInvocation(
                     tool.definition.name,
                     revocation,
-                    grantSessionTrust = disposition == McpApprovalDisposition.SESSION_TRUSTED,
+                    grantSessionTrust = disposition.grantsSessionTrust,
+                    providerId = tool.providerId,
                 )
         }
 
@@ -829,7 +830,7 @@ internal class McpToolRegistryCore(
             val toolName = tool.definition.name
             if (!isAvailable(tool) ||
                 policyEngine.revocationVersion(toolName) != revocation ||
-                policyEngine.policyFor(toolName) == McpPolicyAction.DENY
+                policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
             ) {
                 return@withContext McpApprovalDisposition.POLICY_DENIED to
                     "MCP tool access revoked while awaiting approval"
@@ -840,13 +841,14 @@ internal class McpToolRegistryCore(
                     McpPolicyAction.ALLOW,
                     preserveDeny = true,
                     expectedRevocation = revocation,
+                    providerId = tool.providerId,
                 )
             ) {
                 return@withContext authorization
             }
             val disposition =
                 if (policyEngine.revocationVersion(toolName) != revocation ||
-                    policyEngine.policyFor(toolName) == McpPolicyAction.DENY
+                    policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
                 ) {
                     McpApprovalDisposition.POLICY_DENIED
                 } else {
@@ -855,11 +857,32 @@ internal class McpToolRegistryCore(
             disposition to "MCP persistent approval was not saved; tool execution withheld"
         }
 
+    // Each approval scope (provider-wide, persistent, session/once) owns its own outcome.
+    @Suppress("ReturnCount")
     private suspend fun approvedAuthorization(
         tool: RegisteredMcpTool,
         decision: McpApprovalDecision.Approved,
         revocation: Long,
     ): Pair<McpApprovalDisposition, String?> {
+        if (decision.trustProvider) {
+            // Off the calling coroutine's own dispatcher: this is a synchronous disk write
+            // (docs/THREADING.md), and it must not run on whatever dispatcher delivered this
+            // MCP call.
+            val persisted =
+                withContext(Dispatchers.IO) {
+                    policyEngine.setProviderPolicy(tool.providerId, McpPolicyAction.ALLOW)
+                }
+            // The durable, provider-wide grant either saved (PROVIDER_TRUSTED) or it did not
+            // (PROVIDER_TRUST_PERSIST_FAILED - the call in hand still runs, falling back to
+            // session trust for this one tool via [grantsSessionTrust]).
+            return (
+                if (persisted) {
+                    McpApprovalDisposition.PROVIDER_TRUSTED
+                } else {
+                    McpApprovalDisposition.PROVIDER_TRUST_PERSIST_FAILED
+                }
+            ) to null
+        }
         if (decision.persistPolicy) {
             return validateApproval(tool, McpApprovalDisposition.PERSISTENTLY_ALLOWED to null, revocation)
         }
@@ -935,6 +958,19 @@ internal class McpToolRegistryCore(
                 }
             }
         }
+
+    /**
+     * Whether this disposition should also grant session trust for the tool in hand.
+     *
+     * [McpApprovalDisposition.SESSION_TRUSTED] is the obvious case; PROVIDER_TRUST_PERSIST_FAILED
+     * needs it too - the durable, provider-wide grant did not save, but the call the operator
+     * already approved past should not be blocked by that disk fault, so it falls back to at
+     * least trusting this one tool for the rest of the session.
+     */
+    private val McpApprovalDisposition.grantsSessionTrust: Boolean
+        get() =
+            this == McpApprovalDisposition.SESSION_TRUSTED ||
+                this == McpApprovalDisposition.PROVIDER_TRUST_PERSIST_FAILED
 
     private suspend fun executeAuthorized(
         tool: RegisteredMcpTool,
