@@ -8,6 +8,7 @@ import androidx.compose.runtime.remember
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.KeyboardFocusManager
+import java.awt.Window
 import java.io.File
 import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
@@ -142,11 +143,17 @@ actual fun confirmExecutableDownload(fileName: String): Boolean =
         // A background download still needs an owner that the operator can raise.
         // Without any usable BOSS window, refuse instead of creating an orphan modal.
         val activeWindow = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
-        val fallbackWindowId = WindowFocusManager.resolveActionableWindowId()
         val owner =
-            activeWindow?.takeIf { it.isDisplayable }
-                ?: fallbackWindowId?.let(WindowFocusManager::getWindow)?.takeIf { it.isDisplayable }
+            pickDialogOwner(activeWindow, WindowFocusManager.candidateWindowsForDialogOwner())
                 ?: return@confirmExecutableDownloadOnEdt JOptionPane.CLOSED_OPTION
+        // An owner is not visibility: a modal JDialog blocks input to its owner but does not by
+        // itself raise BOSS above other applications, so a background download could still show
+        // this prompt somewhere the operator never sees while the JxBrowser callback thread waits
+        // behind it. Already on the EDT here (confirmExecutableDownloadOnEdt's own Runnable), so
+        // this can call AWT directly rather than needing invokeLater the way a cross-thread caller
+        // (WindowFocusManager.focusWindow) does.
+        owner.toFront()
+        owner.requestFocus()
         JOptionPane.showOptionDialog(
             owner,
             "\"$fileName\" may be executable. Only download and run it if you trust its source.",
@@ -158,6 +165,22 @@ actual fun confirmExecutableDownload(fileName: String): Boolean =
             ExecutableDownloadOption.CANCEL,
         )
     }
+
+/**
+ * Resolution policy behind [confirmExecutableDownload]'s dialog owner, kept pure so the ordering
+ * can be asserted without live AWT windows (the same reason
+ * [ai.rever.boss.utils.resolveActionableWindowIdFrom] is split out next to it).
+ *
+ * Prefers [activeWindow] - the window actually holding OS focus - over every entry in
+ * [candidates], which is [WindowFocusManager.candidateWindowsForDialogOwner]'s ordered list in
+ * production. Each candidate is tried in order rather than only the first: a disposed-but-not-yet-
+ * unregistered window must not refuse a download while a second, genuinely usable window is open.
+ * Returns null - refuse rather than orphan a modal - only when nothing offered is displayable.
+ */
+internal fun pickDialogOwner(
+    activeWindow: Window?,
+    candidates: List<Window>,
+): Window? = (listOfNotNull(activeWindow) + candidates).firstOrNull { it.isDisplayable }
 
 private enum class ExecutableDownloadOption(
     private val label: String,
