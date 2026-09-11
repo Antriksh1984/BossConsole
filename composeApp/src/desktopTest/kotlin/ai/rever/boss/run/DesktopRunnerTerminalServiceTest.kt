@@ -11,6 +11,7 @@ import ai.rever.boss.plugin.run.RunnerTerminalStopEvent
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
@@ -263,16 +264,18 @@ class DesktopRunnerTerminalServiceTest {
             val originalId = RunnerTerminalService.openRunnerTerminal(config, windowA) {}
             // Both IDs are minted from System.currentTimeMillis() for the same config.id, so back
             // to back mints can collide and produce the identical string - which would make the
-            // "stale" removeTerminal call below legitimately current. A fixed delay cannot
-            // guarantee a distinct id: on Windows the clock tick is commonly ~15 ms and this file
-            // is only excluded on ARM64, so it runs on the windows-latest leg where that collision
-            // is real. Re-mint until they differ (bounded, so a stalled clock fails loudly); each
-            // mint is a real sidebar rerun, which preserves originalId's reverse-map entry.
+            // "stale" removeTerminal call below legitimately current. On Windows the clock tick
+            // is commonly ~15 ms, so a burst of fast mints can all share one tick; this file
+            // runs on the windows-latest leg (only ARM64 is excluded). Re-mint until they
+            // differ, pausing a beat after each collision so a slow clock can advance; the loop
+            // is bounded, so a truly stalled clock fails loudly. Each mint is a real sidebar
+            // rerun, which preserves originalId's reverse-map entry.
             var replacementId = ""
             var mints = 0
             do {
                 replacementId = RunnerTerminalService.rerunRunner(config, windowA) {}
                 mints++
+                if (replacementId == originalId) delay(20)
             } while (replacementId == originalId && mints < 100)
             assertNotEquals(
                 originalId,

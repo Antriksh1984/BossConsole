@@ -356,7 +356,11 @@ actual object RunnerTerminalService {
                     // Send Ctrl+C to stop the running process (window-scoped)
                     val sent = TerminalAPIAccess.sendInterrupt(targetWindowId, targetTerminalId)
                     if (sent) {
-                        logger.debug(LogCategory.TERMINAL, "Sent Ctrl+C to stop existing process", mapOf("windowId" to targetWindowId))
+                        logger.debug(
+                            LogCategory.TERMINAL,
+                            "Sent Ctrl+C to stop existing process",
+                            mapOf("windowId" to targetWindowId),
+                        )
                         // Give the shell time to handle the interrupt and show its prompt
                         // before the tab it belongs to is torn down underneath it. Clamped here
                         // too - setRerunDelayMs clamps on write, but a hand-edited settings file
