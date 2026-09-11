@@ -10,6 +10,7 @@ import ai.rever.boss.ipc.proto.services.SecretPaginatedRequest
 import ai.rever.boss.ipc.proto.services.SecretServiceGrpcKt
 import ai.rever.boss.ipc.proto.services.ShareSecretProtoRequest
 import ai.rever.boss.ipc.proto.services.UnshareSecretProtoRequest
+import ai.rever.boss.ipc.proto.services.UpdateSecretProtoRequest
 import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.PaginatedSecretsData
 import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingData
@@ -19,10 +20,13 @@ import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.UnshareSecretRequestData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
+import io.grpc.HandlerRegistry
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import io.grpc.Server
 import io.grpc.ServerBuilder
+import io.grpc.ServerMethodDefinition
+import io.grpc.ServerServiceDefinition
 import io.grpc.Status
 import io.grpc.StatusException
 import kotlinx.coroutines.runBlocking
@@ -159,6 +163,62 @@ class SecretServiceBridgeTest {
         }
 
     @Test
+    fun `updateSecret refuses an anonymous caller and never reaches the vault`() =
+        runBlocking {
+            assertFailsWith<StatusException> {
+                anonymousCaller().updateSecret(
+                    UpdateSecretProtoRequest.newBuilder().setSecretId("s1").build(),
+                )
+            }
+            assertEquals(0, provider.updateSecretCalls.get())
+        }
+
+    @Test
+    fun `a bridge registered after start is still gated by the interceptor`() =
+        runBlocking {
+            // Production (KernelBootstrap.registerPluginServices) adds these bridges to an
+            // already-started BossIpcServer, i.e. into its fallback HandlerRegistry instead of
+            // the build-time registry. Pin the identity gate on that path: if interceptors ever
+            // stopped covering fallback-resolved methods, the vault would be reachable
+            // anonymously instead of refused.
+            val lateServices = SingleServiceRegistry(SecretServiceBridge(provider).bindService())
+            val lateServer =
+                ServerBuilder
+                    .forPort(0)
+                    .fallbackHandlerRegistry(lateServices)
+                    .intercept(ProcessIdentityInterceptor(tokenRegistry))
+                    .build()
+                    .start()
+
+            val lateChannel =
+                ManagedChannelBuilder.forAddress("localhost", lateServer.port).usePlaintext().build()
+            extraChannels += lateChannel
+            val lateAnonymous = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateChannel)
+            val lateAuthChannel =
+                ManagedChannelBuilder
+                    .forAddress("localhost", lateServer.port)
+                    .usePlaintext()
+                    .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue(DEFAULT_PROCESS)))
+                    .build()
+            extraChannels += lateAuthChannel
+            val lateAuthenticated = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateAuthChannel)
+
+            val failure =
+                assertFailsWith<StatusException> {
+                    lateAnonymous.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+            assertEquals(0, provider.getUserSecretsCalls.get())
+
+            val response = lateAuthenticated.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
+            assertTrue(response.success)
+            assertEquals(1, provider.getUserSecretsCalls.get())
+
+            lateServer.shutdownNow()
+            assertTrue(lateServer.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+        }
+
+    @Test
     fun `shareSecret and unshareSecret refuse an anonymous caller`() =
         runBlocking {
             assertFailsWith<StatusException> {
@@ -187,6 +247,25 @@ class SecretServiceBridgeTest {
 }
 
 /** Records every call so a refusal test can assert the vault was never actually reached. */
+
+/**
+ * A minimal stand-in for [BossIpcServer]'s late-service registry (a grpc-util
+ * MutableHandlerRegistry, which is not on the desktopTest classpath): routes every lookup to a
+ * single service, keyed by full method name exactly like MutableHandlerRegistry does. In grpc
+ * 1.84 the fallback registry is consulted as lookupMethod(fullMethodName, authority). Pins that
+ * builder-level interceptors also cover methods resolved through the fallback registry.
+ */
+private class SingleServiceRegistry(
+    private val service: ServerServiceDefinition,
+) : HandlerRegistry() {
+    override fun getServices(): List<ServerServiceDefinition> = listOf(service)
+
+    override fun lookupMethod(
+        fullMethodName: String,
+        authority: String?,
+    ): ServerMethodDefinition<*, *>? = service.getMethod(fullMethodName)
+}
+
 private class FakeSecretDataProvider : SecretDataProvider {
     val getUserSecretsCalls = AtomicInteger(0)
     val getUserSecretsWithSharingCalls = AtomicInteger(0)

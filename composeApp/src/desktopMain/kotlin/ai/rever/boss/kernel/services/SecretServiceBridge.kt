@@ -218,6 +218,11 @@ class SecretServiceBridge(
      *
      * Mirrors [PluginUIServiceBridge]'s own helper (BossConsole#53) — fails closed rather than let a
      * request with no credential fall through to [provider] with nothing to attribute it to.
+     *
+     * Unary RPCs only: [ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID] is a per-call snapshot,
+     * correct for unary methods. A streaming RPC on this bridge must read
+     * [ProcessIdentityInterceptor.CURRENT_IDENTITY] instead (see [PluginUIServiceBridge.streamUI]),
+     * so a mid-stream revocation is honoured.
      */
     private fun authenticatedCallerOrRefuse(rpc: String): String =
         ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID.get() ?: run {
