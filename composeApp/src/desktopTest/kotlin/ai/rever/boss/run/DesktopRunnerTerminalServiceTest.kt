@@ -11,7 +11,6 @@ import ai.rever.boss.plugin.run.RunnerTerminalStopEvent
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
@@ -184,6 +183,11 @@ class DesktopRunnerTerminalServiceTest {
      * `rerunRunner` ever starts instead: [CoroutineStart.ATOMIC] guarantees the coroutine still
      * runs its body - the state swap included - even though the job is already cancelled by the
      * time it's scheduled, so `rerunStillValid`'s `!callerContext.isActive` read observes it.
+     *
+     * That only holds because nothing suspends between the swap and `rerunStillValid`: the state
+     * lock is a plain `java.util.concurrent.locks.ReentrantLock` (not a suspend `Mutex`) and the
+     * sidebar path skips the `NonCancellable` block, so an already-cancelled job cannot throw
+     * before the swap. If the lock ever becomes a `Mutex`, add a probe that the swap actually ran.
      */
     @OptIn(DelicateCoroutinesApi::class)
     @Test
@@ -227,6 +231,11 @@ class DesktopRunnerTerminalServiceTest {
                 RunnerTerminalService.isConfigRunningInWindow(windowB, config.id),
                 "the caller's own window must still read as running after its rerun is cancelled",
             )
+            assertEquals(
+                config.id,
+                RunnerTerminalService.getConfigForTerminal(originalId),
+                "the rollback re-adds the config to the restored terminal's reverse map",
+            )
             assertTrue(RunnerTerminalService.isConfigRunning(config.id))
         }
 
@@ -253,12 +262,23 @@ class DesktopRunnerTerminalServiceTest {
 
             val originalId = RunnerTerminalService.openRunnerTerminal(config, windowA) {}
             // Both IDs are minted from System.currentTimeMillis() for the same config.id, so back
-            // to back calls can otherwise collide on a fast machine and produce the identical
-            // string - which would make the "stale" removeTerminal call below legitimately current.
-            delay(5)
-            val replacementId = RunnerTerminalService.rerunRunner(config, windowA) {}
-
-            assertNotEquals(originalId, replacementId)
+            // to back mints can collide and produce the identical string - which would make the
+            // "stale" removeTerminal call below legitimately current. A fixed delay cannot
+            // guarantee a distinct id: on Windows the clock tick is commonly ~15 ms and this file
+            // is only excluded on ARM64, so it runs on the windows-latest leg where that collision
+            // is real. Re-mint until they differ (bounded, so a stalled clock fails loudly); each
+            // mint is a real sidebar rerun, which preserves originalId's reverse-map entry.
+            var replacementId = ""
+            var mints = 0
+            do {
+                replacementId = RunnerTerminalService.rerunRunner(config, windowA) {}
+                mints++
+            } while (replacementId == originalId && mints < 100)
+            assertNotEquals(
+                originalId,
+                replacementId,
+                "replacement must mint a distinct terminal id",
+            )
             assertEquals(replacementId, RunnerTerminalService.configToTerminal.value[config.id])
             assertTrue(RunnerTerminalService.isConfigRunning(config.id))
 

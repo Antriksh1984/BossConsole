@@ -340,9 +340,11 @@ actual object RunnerTerminalService {
         // Only a window whose tab was actually torn down should be rolled back on cancellation.
         // SIDEBAR_PANEL (and a first-ever run, where existingTerminalId is null) never interrupts
         // or closes anything below, so there is nothing of existingWindowId's to undo there.
+        // This predicate IS the teardown guard below - tornDownWindowId is non-null exactly when
+        // the interrupt/close block runs - so the two cannot drift apart (BossConsole#486 review).
         val tornDownWindowId = existingWindowId?.takeIf { existingTerminalId != null && !usesSidebar }
 
-        if (existingTerminalId != null && existingWindowId != null && !usesSidebar) {
+        if (tornDownWindowId != null) {
             withContext(NonCancellable) {
                 try {
                     // Send Ctrl+C to stop the running process (window-scoped)
