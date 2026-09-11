@@ -1,6 +1,8 @@
 package ai.rever.boss.plugin.browser
 
 import ai.rever.boss.platform.FileSystemUtils
+import ai.rever.boss.testsupport.repoRoot
+import java.io.File
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -39,25 +41,42 @@ class ExecutableDownloadConsentTest {
 
     @Test
     fun `the download handler reads the live BrowserSettings toggle, not a cached copy`() {
-        // FluckEngine passes BrowserSettings.warnForExecutables at the call site rather than a
-        // value captured earlier, so a Settings > Browser > Downloads change applies to the very
-        // next download with no restart. This pins that call-site shape rather than a snapshot.
-        val original = BrowserSettings.warnForExecutables
-        try {
-            BrowserSettings.warnForExecutables = false
-            assertTrue(
-                executableDownloadAllowed(BrowserSettings.warnForExecutables, "setup.exe", "setup.exe") {
-                    error("disabled warning must not prompt")
-                },
-            )
+        // The call site cannot be exercised without a JxBrowser license, so it is pinned
+        // textually in the style of SettingsSearchIndexDriftTest. Reverting the first argument
+        // to the unpersisted downloadSettings copy would silently disarm the Settings > Browser
+        // > Downloads toggle for every download, and a behavioural test re-implementing the
+        // call site would stay green through exactly that regression.
+        val fluckEngine = "composeApp/src/desktopMain/kotlin/ai/rever/boss/plugin/browser/FluckEngine.kt"
+        val source = File(repoRoot(), fluckEngine).readText()
+        val start = source.indexOf("executableDownloadAllowed(")
+        assertTrue(start >= 0, "executableDownloadAllowed call site missing from FluckEngine")
+        var depth = 0
+        var end = -1
+        for (index in start..source.lastIndex) {
+            when (source[index]) {
+                '(' -> {
+                    depth++
+                }
 
-            BrowserSettings.warnForExecutables = true
-            assertFalse(
-                executableDownloadAllowed(BrowserSettings.warnForExecutables, "setup.exe", "setup.exe") { false },
-            )
-        } finally {
-            BrowserSettings.warnForExecutables = original
+                ')' -> {
+                    depth--
+                    if (depth == 0) {
+                        end = index
+                        break
+                    }
+                }
+            }
         }
+        assertTrue(end > start, "unbalanced parentheses around the executableDownloadAllowed call")
+        val arguments = source.substring(start, end + 1)
+        assertTrue(
+            arguments.contains("BrowserSettings.warnForExecutables"),
+            "the download handler must read BrowserSettings.warnForExecutables live at the call site",
+        )
+        assertFalse(
+            arguments.contains("downloadSettings.warnForExecutables"),
+            "the download handler must not read the unpersisted downloadSettings copy",
+        )
     }
 
     @Test

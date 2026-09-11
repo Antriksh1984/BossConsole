@@ -32,7 +32,14 @@ data class BrowserSettingsData(
 
 object BrowserSettingsManager {
     private val logger = BossLogger.forComponent("BrowserSettingsManager")
-    private val settingsFile = BossDirectories.resolve("browser-settings.json")
+
+    /**
+     * `internal var` so a test can point it at a temp file, matching
+     * `DefaultAppsSettingsManager`. There is no other seam: the path is resolved from
+     * `BossDirectories`, and a round-trip test that wrote to the real
+     * `~/.boss/browser-settings.json` would clobber the developer's own settings.
+     */
+    internal var settingsFile = BossDirectories.resolve("browser-settings.json")
     private val json =
         Json {
             prettyPrint = true
@@ -55,6 +62,11 @@ object BrowserSettingsManager {
      * first opened, so a persisted "show share button = true" wouldn't apply on boot.
      */
     fun ensureLoaded() { /* referencing this object already ran loadSettingsSync() */ }
+
+    /** Test seam: re-run the synchronous load so a [saveSettings] is visible without a process restart. */
+    internal fun reloadForTest() {
+        loadSettingsSync()
+    }
 
     private fun loadSettingsSync() {
         try {

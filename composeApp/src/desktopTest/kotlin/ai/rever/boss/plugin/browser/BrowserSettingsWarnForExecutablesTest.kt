@@ -1,8 +1,11 @@
 package ai.rever.boss.plugin.browser
 
-import kotlinx.serialization.json.Json
-import kotlin.test.AfterTest
-import kotlin.test.Test
+import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -13,18 +16,29 @@ import kotlin.test.assertTrue
  * Unlike the four toggles [BrowserSettingsMirrorTest] covers, this one has no system-property
  * mirror: FluckEngine's download handler lives in the host, not a separately classloaded plugin,
  * so a plain read of [BrowserSettings.warnForExecutables] is enough to reach it without a restart.
- * These tests pin the three things that would otherwise silently drift: the default matches
- * between the in-memory object and the persisted shape, both values survive a JSON round-trip
- * (there is no injectable settings file to test the real save/load path against - see
- * [BrowserSettingsManager], which resolves a fixed path under the real BOSS data directory), and
- * the handler in [ExecutableDownloadConsentTest] reads this field live rather than a cached copy.
+ *
+ * The round-trip tests point [BrowserSettingsManager.settingsFile] at a temp file - the same
+ * seam [DefaultAppsSettingsManager] uses - so they exercise the real saveSettings/load path
+ * rather than a re-statement of the assignment. The two lines in [BrowserSettingsManager] that
+ * copy the field into the persisted shape and back are the ones a mutation would slip past.
  */
 class BrowserSettingsWarnForExecutablesTest {
-    private val original = BrowserSettings.warnForExecutables
+    @TempDir
+    lateinit var dir: File
 
-    @AfterTest
+    private lateinit var originalFile: File
+    private val originalValue = BrowserSettings.warnForExecutables
+
+    @BeforeEach
+    fun pointAtTempFile() {
+        originalFile = BrowserSettingsManager.settingsFile
+        BrowserSettingsManager.settingsFile = File(dir, "browser-settings.json")
+    }
+
+    @AfterEach
     fun restore() {
-        BrowserSettings.warnForExecutables = original
+        BrowserSettingsManager.settingsFile = originalFile
+        BrowserSettings.warnForExecutables = originalValue
     }
 
     @Test
@@ -34,23 +48,42 @@ class BrowserSettingsWarnForExecutablesTest {
     }
 
     @Test
-    fun `both persisted values round-trip through JSON`() {
-        val json = Json { ignoreUnknownKeys = true }
-
-        for (value in listOf(true, false)) {
-            val encoded = json.encodeToString(BrowserSettingsData(warnForExecutables = value))
-            val decoded = json.decodeFromString<BrowserSettingsData>(encoded)
-            assertEquals(value, decoded.warnForExecutables, "round-trip failed for warnForExecutables=$value")
+    fun `both values survive the real save and load`() {
+        for (value in listOf(false, true)) {
+            BrowserSettings.warnForExecutables = value
+            runBlocking { BrowserSettingsManager.saveSettings() }
+            BrowserSettingsManager.reloadForTest()
+            assertEquals(
+                value,
+                BrowserSettings.warnForExecutables,
+                "warnForExecutables=$value did not survive saveSettings + reload",
+            )
         }
     }
 
     @Test
-    fun `turning the setting off is what a save actually persists`() {
+    fun `a settings file predating the key loads as on, so an upgrade keeps the warning`() {
         BrowserSettings.warnForExecutables = false
-        val snapshot =
-            BrowserSettingsData(
-                warnForExecutables = BrowserSettings.warnForExecutables,
-            )
-        assertFalse(snapshot.warnForExecutables)
+        // The shape an earlier build wrote: every field except warnForExecutables.
+        BrowserSettingsManager.settingsFile.writeText(
+            """
+            {
+                "currentProfile": "browser-profile",
+                "availableProfiles": [
+                    "browser-profile"
+                ]
+            }
+            """.trimIndent(),
+        )
+        BrowserSettingsManager.reloadForTest()
+        assertTrue(BrowserSettings.warnForExecutables, "a file without the key must load as on")
+    }
+
+    @Test
+    fun `a corrupt settings file does not crash the load or clobber the in-memory value`() {
+        BrowserSettings.warnForExecutables = false
+        BrowserSettingsManager.settingsFile.writeText("{ not json")
+        BrowserSettingsManager.reloadForTest()
+        assertFalse(BrowserSettings.warnForExecutables, "a failed load must keep the in-memory value")
     }
 }
