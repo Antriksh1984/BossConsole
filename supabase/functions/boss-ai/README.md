@@ -7,9 +7,10 @@ cannot be changed by a share.
 
 ## Deployment
 
-1. Apply `20260912000000_boss_ai.sql`, `20260912001000_boss_ai_hardening.sql`, and
-   `20260912002000_boss_ai_validation.sql` in order. Earlier files have already been applied to the
-   preview branch; fixes are forward migrations, not edits to applied history.
+1. Apply `20260912000000_boss_ai.sql`, `20260912001000_boss_ai_hardening.sql`,
+   `20260912002000_boss_ai_validation.sql`, and `20260912003000_boss_ai_allowance_preflight.sql` in
+   order. Earlier files have already been applied to the preview branch; fixes are forward
+   migrations, not edits to applied history.
 2. Set `BOSS_AI_SIGNING_SECRET` to at least 32 random bytes (encoded as a string). Set upstream API
    keys as secrets named `BOSS_AI_<NAME>`. The signing-secret name is explicitly prohibited as an
    upstream key in both SQL and the handler. Never put these keys in a shared vault entry. Supabase
@@ -108,7 +109,9 @@ Admission rechecks current policy/configuration under its lock, and the handler 
 the admitted snapshot. Normal malformed/capability-invalid requests create no ledger rows; a
 configuration change between preflight and admission can still require a zero-charge settlement.
 Admission requires READ COMMITTED so the post-lock usage recount sees earlier admissions. Other
-transaction isolation levels are refused explicitly.
+transaction isolation levels are refused explicitly. An effective allowance smaller than the model's
+context cannot admit even one request: preflight returns `503 misconfigured_allowance`, without a
+ledger row. This is distinct from temporary quota exhaustion (`429`).
 
 For each model, use the maximum allowance from matching permissions for each period, never the sum.
 Every configured period applies. Days, ISO weeks starting Monday, and months reset at their UTC
@@ -133,7 +136,9 @@ Published connections must pass both streaming and non-streaming usage checks be
 upstream reporting more than the configured context emits `usage_exceeds_configured_context`, and
 the charge is capped at the admitted reservation. Settlement retries and late stream truncation
 after a usage frame preserve the measured count rather than treating it as unknown. Investigate
-either diagnostic before continuing to publish the connection.
+either diagnostic before continuing to publish the connection. Settlement is attempted twice; if
+both attempts fail, a successful completion is still returned and the full reservation remains
+charged. Each diagnostic event is emitted at most once per request, including across retries.
 
 Requests are limited to four minutes, below the five-minute concurrency lease. A worker crash leaves
 the charge in place but releases its concurrency slot after the lease. Usage rows should be retained
@@ -162,7 +167,9 @@ requests. App attestation and device-bound signing are not implemented.
 No inference content or credentials are logged. Errors use owned messages. Diagnostics contain only
 owned event/phase names, numeric upstream statuses, request UUIDs, and validated database SQLSTATE
 codes, never exception messages, SQL parameters or upstream bodies. Every response carries
-`X-Request-ID`. No automatic cross-provider fallback is enabled.
+`X-Request-ID`. No automatic cross-provider fallback is enabled. Routing secrets and configuration
+are private, but generated content and provider-specific choice metadata are not an
+upstream-identity anonymization boundary.
 
 ## Verification
 

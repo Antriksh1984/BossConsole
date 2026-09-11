@@ -33,7 +33,10 @@ function failure(error: unknown, requestId: string): Response {
 export function createHandler(deps: Dependencies): (request: Request) => Promise<Response> {
   return async (request) => {
     const requestId = crypto.randomUUID()
+    const auditedEvents = new Set<string>()
     const audit = (event: string) => {
+      if (auditedEvents.has(event)) return
+      auditedEvents.add(event)
       try {
         if (deps.audit) deps.audit(event, requestId)
         else console.warn(JSON.stringify({ event, request_id: requestId }))
@@ -81,9 +84,16 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       const lookup = await deps.rpc("boss_ai_lookup", {
         p_user_id: user,
         p_model_id: input.model,
-      }) as { model: Model; connection: Connection } | null
+      }) as { error?: string; model: Model; connection: Connection } | null
       if (!lookup) {
         throw new HttpError(403, "forbidden", "This model is not available for your account.")
+      }
+      if (lookup.error) {
+        throw new HttpError(
+          503,
+          "misconfigured_allowance",
+          "This model's allowance cannot fit a request. Contact your BOSS administrator.",
+        )
       }
       requestBody(input, lookup.model, lookup.connection.api_type)
       phase = "reservation"
@@ -164,6 +174,11 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         phase = "settlement"
         await deps.rpc("boss_ai_settle", { p_request_id: requestId, p_tokens: tokens })
       }
+      const settleWithRetry = async (tokens: number | null) => {
+        await settle(tokens).catch(async () => {
+          await settle(tokens).catch(() => audit("settlement_failed"))
+        })
+      }
       if (input.stream !== true) {
         try {
           phase = "upstream_response"
@@ -178,7 +193,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
           )
           const tokens = (output.usage as Obj | null)?.total_tokens
           measuredTokens = typeof tokens === "number" ? tokens : null
-          await settle(measuredTokens)
+          await settleWithRetry(measuredTokens)
           reservation = undefined
           return json(output, 200, requestId)
         } finally {
@@ -204,9 +219,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         await iterator.return?.(undefined).catch(() => {})
         // If settlement fails the full reservation remains charged. Never refund
         // an unknown outcome merely because a worker or a client disconnected.
-        await settle(tokens).catch(async () => {
-          await settle(tokens).catch(() => audit("settlement_failed"))
-        })
+        await settleWithRetry(tokens)
       }
       reservation = undefined // The stream now owns cleanup and settlement.
       const stream = new ReadableStream<Uint8Array>({
@@ -257,11 +270,13 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (!(error instanceof HttpError) || error.status >= 500) audit(`${phase}_failed`)
       if (reservation) {
         if (dispatched && measuredTokens === null) audit("usage_unknown_reservation_retained")
-        await deps.rpc("boss_ai_settle", {
+        const settlement = {
           p_request_id: reservation,
           p_tokens: dispatched ? measuredTokens : 0,
+        }
+        await deps.rpc("boss_ai_settle", settlement).catch(async () => {
+          await deps.rpc("boss_ai_settle", settlement).catch(() => audit("settlement_failed"))
         })
-          .catch(() => audit("settlement_failed"))
       }
       return failure(error, requestId)
     }

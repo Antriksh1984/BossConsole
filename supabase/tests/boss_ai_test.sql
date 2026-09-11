@@ -24,6 +24,10 @@ SELECT ok(public.boss_ai_lookup('ba000000-0000-4000-8000-000000000001','pgtap') 
  'authorized service-role preflight returns configuration');
 SELECT is((SELECT count(*) FROM public.boss_ai_requests WHERE model_id='pgtap'),0::bigint,
  'preflight creates no accounting rows');
+UPDATE public.boss_ai_allowances SET tokens_per_day=1 WHERE model_id='pgtap';
+SELECT is(public.boss_ai_lookup('ba000000-0000-4000-8000-000000000001','pgtap')->>'error',
+ 'misconfigured_allowance','an allowance smaller than one context is a configuration fault');
+UPDATE public.boss_ai_allowances SET tokens_per_day=10240 WHERE model_id='pgtap';
 SELECT is((SELECT count(*) FROM public.boss_ai_connections WHERE id='pgtap'),1::bigint,
  'real service role can read RLS-protected routing');
 SELECT ok(public.boss_ai_reserve('ba000000-0000-4000-8000-000000000001','pgtap',

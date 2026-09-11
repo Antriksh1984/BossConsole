@@ -71,6 +71,24 @@ Deno.test("stream options permit accounting usage but reject disabling it or ext
   }
 })
 
+Deno.test("assistant tool calls may omit content without breaking the tool round", () => {
+  const input = {
+    messages: [{
+      role: "assistant",
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "test", arguments: "{}" } }],
+    }],
+  }
+  assertEquals(
+    (requestBody(input, model, "openai_chat").messages as Record<string, unknown>[])[0].content,
+    null,
+  )
+  assertEquals(
+    (requestBody(input, model, "openai_responses").input as Record<string, unknown>[])[0].type,
+    "function_call",
+  )
+  assertThrows(() => requestBody({ messages: [{ role: "user" }] }, model, "openai_chat"))
+})
+
 Deno.test("routing overrides and unadvertised capabilities are refused", () => {
   for (const field of ["base_url", "api_key", "provider", "n", "previous_response_id"]) {
     assertThrows(() => requestBody({ ...input, [field]: "override" }, model, "openai_chat"))

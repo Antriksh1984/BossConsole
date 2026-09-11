@@ -10,6 +10,9 @@ async function fixture(options: {
   upstreamStatus?: number
   payload?: Obj
   failFirstSettlement?: boolean
+  failAllSettlements?: boolean
+  lookupDenied?: boolean
+  lookupMisconfigured?: boolean
   failFetch?: boolean
   hang?: boolean
   stallStream?: boolean
@@ -32,6 +35,13 @@ async function fixture(options: {
     secret: (name) => name === "BOSS_AI_SIGNING_SECRET" ? secret : "upstream-secret",
     async rpc(name, params) {
       calls.push({ name, params })
+      if (name === "boss_ai_lookup" && options.lookupDenied) return null
+      if (name === "boss_ai_lookup" && options.lookupMisconfigured) {
+        return { error: "misconfigured_allowance" }
+      }
+      if (name === "boss_ai_settle" && options.failAllSettlements) {
+        throw new Error("database unavailable")
+      }
       if (name === "boss_ai_settle" && options.failFirstSettlement && ++settlements === 1) {
         throw new Error("private database detail")
       }
@@ -297,11 +307,45 @@ Deno.test("failed dispatch and timeout are observable unknown outcomes not infer
 
 Deno.test("known usage survives a settlement retry", async () => {
   const f = await fixture({ failFirstSettlement: true })
-  await f.handler(f.request(body))
+  const response = await f.handler(f.request(body))
+  assertEquals(response.status, 200)
+  assertEquals((await response.json()).choices[0].message.content, "hello")
   assertEquals(
     f.calls.filter((call) => call.name === "boss_ai_settle").map((call) => call.params.p_tokens),
     [5, 5],
   )
+})
+
+Deno.test("settlement outages preserve the completion and deduplicate accounting diagnostics", async () => {
+  const f = await fixture({
+    failAllSettlements: true,
+    payload: { choices: [{ message: { role: "assistant", content: "hello" } }] },
+  })
+  const response = await f.handler(f.request(body))
+  assertEquals(response.status, 200)
+  assertEquals((await response.json()).choices[0].message.content, "hello")
+  assertEquals(
+    f.calls.filter((call) => call.name === "boss_ai_settle").map((call) => call.params.p_tokens),
+    [null, null],
+  )
+  assertEquals(f.audits.filter((event) => event === "usage_unknown_reservation_retained").length, 1)
+  assertEquals(f.audits.filter((event) => event === "settlement_failed").length, 1)
+})
+
+Deno.test("preflight permission denial never creates a reservation", async () => {
+  const f = await fixture({ lookupDenied: true })
+  assertEquals((await f.handler(f.request(body))).status, 403)
+  assertEquals(f.calls.map((call) => call.name), ["boss_ai_lookup"])
+  assertEquals(f.requests.length, 0)
+})
+
+Deno.test("impossible allowances report configuration faults instead of temporary exhaustion", async () => {
+  const f = await fixture({ lookupMisconfigured: true })
+  const response = await f.handler(f.request(body))
+  assertEquals(response.status, 503)
+  assertEquals((await response.json()).error.code, "misconfigured_allowance")
+  assertEquals(f.calls.map((call) => call.name), ["boss_ai_lookup"])
+  assertEquals(f.requests.length, 0)
 })
 
 Deno.test("missing usage emits accounting diagnostics and malformed upstream is a 502", async () => {

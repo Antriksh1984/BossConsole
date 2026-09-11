@@ -35,6 +35,14 @@ Deno.test("database policy, reservations, settlement, revocation and grants", as
       ),
     )
     const other = "00000000-0000-0000-0000-000000000002"
+    await db.exec(
+      await Deno.readTextFile(
+        new URL(
+          "../../../migrations/20260912003000_boss_ai_allowance_preflight.sql",
+          import.meta.url,
+        ),
+      ),
+    )
     await db.exec(`
       INSERT INTO auth.users(id) VALUES('${user}'),('${other}');
       INSERT INTO public.permissions(name) VALUES('ai.extended');
@@ -48,6 +56,15 @@ Deno.test("database policy, reservations, settlement, revocation and grants", as
       (await db.query<{ value: any }>(sql, params)).rows[0].value
     const policy = () => scalar("SELECT public.boss_ai_policy($1,'test') AS value", [user])
     assertEquals(await policy(), { day: 4096, week: 8192, month: 16384, concurrent: 3 })
+    await db.exec(
+      "BEGIN; UPDATE public.boss_ai_allowances SET tokens_per_day=1 WHERE model_id='test'",
+    )
+    assertEquals(
+      await scalar("SELECT public.boss_ai_lookup($1,'test')->>'error' AS value", [user]),
+      "misconfigured_allowance",
+    )
+    assertEquals(await scalar("SELECT count(*)::int AS value FROM public.boss_ai_requests"), 0)
+    await db.exec("ROLLBACK")
     const reserve = (id: string, who = user) =>
       scalar("SELECT public.boss_ai_reserve($1,'test',$2) AS value", [who, id])
     const ids = Array.from({ length: 5 }, () => crypto.randomUUID())

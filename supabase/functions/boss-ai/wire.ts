@@ -134,7 +134,11 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
     if (options.include_usage !== undefined && options.include_usage !== true) throw invalid()
   }
   const messages = input.messages.map((value) => {
-    const m = object(value)
+    const original = object(value)
+    const m = original.role === "assistant" && original.content === undefined &&
+        Array.isArray(original.tool_calls) && original.tool_calls.length > 0
+      ? { ...original, content: null }
+      : original
     if (
       m.name !== undefined && (typeof m.name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(m.name))
     ) {
