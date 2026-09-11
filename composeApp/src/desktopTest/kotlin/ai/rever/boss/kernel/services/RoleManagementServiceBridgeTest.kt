@@ -103,7 +103,9 @@ class RoleManagementServiceBridgeTest {
     @Test
     fun `getAllPermissions refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> { anonymousCaller().getAllPermissions(Empty.getDefaultInstance()) }
+            val failure =
+                assertFailsWith<StatusException> { anonymousCaller().getAllPermissions(Empty.getDefaultInstance()) }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.getAllPermissionsCalls.get())
         }
 
@@ -118,30 +120,42 @@ class RoleManagementServiceBridgeTest {
     @Test
     fun `createRole refuses an anonymous caller and never mints a role`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().createRole(CreateRoleRequest.newBuilder().setName("rogue-admin").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().createRole(CreateRoleRequest.newBuilder().setName("rogue-admin").build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.createRoleCalls.get())
         }
 
     @Test
     fun `createPermission refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().createPermission(CreatePermissionRequest.newBuilder().setName("secrets.read").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().createPermission(
+                        CreatePermissionRequest.newBuilder().setName("secrets.read").build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.createPermissionCalls.get())
         }
 
     @Test
     fun `deleteRole and deletePermission refuse an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().deleteRole(RoleNameRequest.newBuilder().setName("admin").build())
-            }
-            assertFailsWith<StatusException> {
-                anonymousCaller().deletePermission(PermissionNameRequest.newBuilder().setName("secrets.read").build())
-            }
+            val roleFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().deleteRole(RoleNameRequest.newBuilder().setName("admin").build())
+                }
+            val permissionFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().deletePermission(
+                        PermissionNameRequest.newBuilder().setName("secrets.read").build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, roleFailure.status.code)
+            assertEquals(Status.Code.PERMISSION_DENIED, permissionFailure.status.code)
             assertEquals(0, provider.deleteRoleCalls.get())
             assertEquals(0, provider.deletePermissionCalls.get())
         }
@@ -149,47 +163,60 @@ class RoleManagementServiceBridgeTest {
     @Test
     fun `assignPermissionToRole refuses an anonymous caller - no silent privilege grant`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().assignPermissionToRole(
-                    RolePermissionRequest
-                        .newBuilder()
-                        .setRoleName("admin")
-                        .setPermissionName("secrets.read")
-                        .build(),
-                )
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().assignPermissionToRole(
+                        RolePermissionRequest
+                            .newBuilder()
+                            .setRoleName("admin")
+                            .setPermissionName("secrets.read")
+                            .build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.assignPermissionToRoleCalls.get())
         }
 
     @Test
     fun `removePermissionFromRole refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().removePermissionFromRole(
-                    RolePermissionRequest
-                        .newBuilder()
-                        .setRoleName("admin")
-                        .setPermissionName("secrets.read")
-                        .build(),
-                )
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().removePermissionFromRole(
+                        RolePermissionRequest
+                            .newBuilder()
+                            .setRoleName("admin")
+                            .setPermissionName("secrets.read")
+                            .build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.removePermissionFromRoleCalls.get())
         }
 
     @Test
-    fun `getRolePermissions and name validation refuse an anonymous caller`() =
+    fun `getRolePermissions and name validation refuse an anonymous caller and never reach the provider`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().getRolePermissions(RoleNameRequest.newBuilder().setName("admin").build())
-            }
-            assertFailsWith<StatusException> {
-                anonymousCaller().validateRoleName(RoleNameRequest.newBuilder().setName("admin").build())
-            }
-            assertFailsWith<StatusException> {
-                anonymousCaller().validatePermissionName(
-                    PermissionNameRequest.newBuilder().setName("secrets.read").build(),
-                )
-            }
+            val rolePermissionsFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().getRolePermissions(RoleNameRequest.newBuilder().setName("admin").build())
+                }
+            val validateRoleFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().validateRoleName(RoleNameRequest.newBuilder().setName("admin").build())
+                }
+            val validatePermissionFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().validatePermissionName(
+                        PermissionNameRequest.newBuilder().setName("secrets.read").build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, rolePermissionsFailure.status.code)
+            assertEquals(Status.Code.PERMISSION_DENIED, validateRoleFailure.status.code)
+            assertEquals(Status.Code.PERMISSION_DENIED, validatePermissionFailure.status.code)
+            assertEquals(0, provider.getRolePermissionsCalls.get())
+            assertEquals(0, provider.validateRoleNameCalls.get())
+            assertEquals(0, provider.validatePermissionNameCalls.get())
         }
 
     @Test
@@ -197,6 +224,34 @@ class RoleManagementServiceBridgeTest {
         runBlocking {
             val response = authenticated.validateRoleName(RoleNameRequest.newBuilder().setName("editor").build())
             assertTrue(response.valid)
+        }
+
+    @Test
+    fun `a revoked token is refused the same as no credential at all`() =
+        runBlocking {
+            // The post-reapChildren / post-respawn case: identityFor returns null for a token
+            // the registry no longer holds, same as for an absent one - but the caller here is a
+            // live process that had a valid credential moments ago, not an anonymous one.
+            val revocableToken = tokenRegistry.issue("$DEFAULT_PROCESS.revocable")
+            val revocableChannel =
+                ManagedChannelBuilder
+                    .forAddress("localhost", server.port)
+                    .usePlaintext()
+                    .intercept(ProcessTokenClientInterceptor(revocableToken))
+                    .build()
+            extraChannels += revocableChannel
+            val revocable = RoleManagementServiceGrpcKt.RoleManagementServiceCoroutineStub(revocableChannel)
+
+            // Confirm the token actually worked before revoking it.
+            revocable.getAllRoles(Empty.getDefaultInstance())
+            assertEquals(1, provider.getAllRolesCalls.get())
+
+            tokenRegistry.revoke("$DEFAULT_PROCESS.revocable")
+
+            val failure =
+                assertFailsWith<StatusException> { revocable.getAllRoles(Empty.getDefaultInstance()) }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+            assertEquals(1, provider.getAllRolesCalls.get(), "the revoked call must not have reached the provider")
         }
 
     companion object {
@@ -215,6 +270,9 @@ private class FakeRoleManagementProvider : RoleManagementProvider {
     val deletePermissionCalls = AtomicInteger(0)
     val assignPermissionToRoleCalls = AtomicInteger(0)
     val removePermissionFromRoleCalls = AtomicInteger(0)
+    val getRolePermissionsCalls = AtomicInteger(0)
+    val validateRoleNameCalls = AtomicInteger(0)
+    val validatePermissionNameCalls = AtomicInteger(0)
 
     override suspend fun getAllRoles(): Result<List<RoleInfoData>> {
         getAllRolesCalls.incrementAndGet()
@@ -279,10 +337,18 @@ private class FakeRoleManagementProvider : RoleManagementProvider {
         return Result.success(Unit)
     }
 
-    override suspend fun getRolePermissions(roleName: String): Result<RoleWithPermissionsData> =
-        Result.success(RoleWithPermissionsData(roleName = roleName, permissions = emptyList()))
+    override suspend fun getRolePermissions(roleName: String): Result<RoleWithPermissionsData> {
+        getRolePermissionsCalls.incrementAndGet()
+        return Result.success(RoleWithPermissionsData(roleName = roleName, permissions = emptyList()))
+    }
 
-    override fun validateRoleName(roleName: String): String? = null
+    override fun validateRoleName(roleName: String): String? {
+        validateRoleNameCalls.incrementAndGet()
+        return null
+    }
 
-    override fun validatePermissionName(permissionName: String): String? = null
+    override fun validatePermissionName(permissionName: String): String? {
+        validatePermissionNameCalls.incrementAndGet()
+        return null
+    }
 }

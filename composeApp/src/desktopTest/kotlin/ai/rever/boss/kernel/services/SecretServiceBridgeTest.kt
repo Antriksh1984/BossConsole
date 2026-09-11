@@ -114,27 +114,35 @@ class SecretServiceBridgeTest {
     @Test
     fun `getUserSecretsWithSharingInfo refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().getUserSecretsWithSharingInfo(SecretPaginatedRequest.newBuilder().build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().getUserSecretsWithSharingInfo(SecretPaginatedRequest.newBuilder().build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.getUserSecretsWithSharingCalls.get())
         }
 
     @Test
     fun `searchSecrets refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().searchSecrets(SearchSecretsRequest.newBuilder().setQuery("q").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().searchSecrets(SearchSecretsRequest.newBuilder().setQuery("q").build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.searchSecretsCalls.get())
         }
 
     @Test
     fun `createSecret refuses an anonymous caller and never reaches the vault`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().createSecret(CreateSecretProtoRequest.newBuilder().setWebsite("evil.example").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().createSecret(
+                        CreateSecretProtoRequest.newBuilder().setWebsite("evil.example").build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.createSecretCalls.get())
         }
 
@@ -156,20 +164,24 @@ class SecretServiceBridgeTest {
     @Test
     fun `deleteSecret refuses an anonymous caller and never reaches the vault`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().deleteSecret(SecretIdRequest.newBuilder().setId("s1").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().deleteSecret(SecretIdRequest.newBuilder().setId("s1").build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.deleteSecretCalls.get())
         }
 
     @Test
     fun `updateSecret refuses an anonymous caller and never reaches the vault`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().updateSecret(
-                    UpdateSecretProtoRequest.newBuilder().setSecretId("s1").build(),
-                )
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().updateSecret(
+                        UpdateSecretProtoRequest.newBuilder().setSecretId("s1").build(),
+                    )
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.updateSecretCalls.get())
         }
 
@@ -189,44 +201,82 @@ class SecretServiceBridgeTest {
                     .intercept(ProcessIdentityInterceptor(tokenRegistry))
                     .build()
                     .start()
+            try {
+                val lateChannel =
+                    ManagedChannelBuilder.forAddress("localhost", lateServer.port).usePlaintext().build()
+                extraChannels += lateChannel
+                val lateAnonymous = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateChannel)
+                // A distinct process id: `tokenRegistry.issue` replaces and invalidates whatever
+                // token DEFAULT_PROCESS already held, which would silently kill the credential
+                // `authenticated` (from setUp) is carrying for the rest of this test class.
+                val lateAuthChannel =
+                    ManagedChannelBuilder
+                        .forAddress("localhost", lateServer.port)
+                        .usePlaintext()
+                        .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue("$DEFAULT_PROCESS.late")))
+                        .build()
+                extraChannels += lateAuthChannel
+                val lateAuthenticated = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateAuthChannel)
 
-            val lateChannel =
-                ManagedChannelBuilder.forAddress("localhost", lateServer.port).usePlaintext().build()
-            extraChannels += lateChannel
-            val lateAnonymous = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateChannel)
-            val lateAuthChannel =
+                val failure =
+                    assertFailsWith<StatusException> {
+                        lateAnonymous.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
+                    }
+                assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+                assertEquals(0, provider.getUserSecretsCalls.get())
+
+                val response = lateAuthenticated.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
+                assertTrue(response.success)
+                assertEquals(1, provider.getUserSecretsCalls.get())
+            } finally {
+                lateServer.shutdownNow()
+                assertTrue(lateServer.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            }
+        }
+
+    @Test
+    fun `a revoked token is refused the same as no credential at all`() =
+        runBlocking {
+            // The post-reapChildren / post-respawn case: identityFor returns null for a token
+            // the registry no longer holds, same as for an absent one - but the caller here is a
+            // live process that had a valid credential moments ago, not an anonymous one.
+            val revocableToken = tokenRegistry.issue("$DEFAULT_PROCESS.revocable")
+            val revocableChannel =
                 ManagedChannelBuilder
-                    .forAddress("localhost", lateServer.port)
+                    .forAddress("localhost", server.port)
                     .usePlaintext()
-                    .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue(DEFAULT_PROCESS)))
+                    .intercept(ProcessTokenClientInterceptor(revocableToken))
                     .build()
-            extraChannels += lateAuthChannel
-            val lateAuthenticated = SecretServiceGrpcKt.SecretServiceCoroutineStub(lateAuthChannel)
+            extraChannels += revocableChannel
+            val revocable = SecretServiceGrpcKt.SecretServiceCoroutineStub(revocableChannel)
+
+            // Confirm the token actually worked before revoking it.
+            assertTrue(revocable.getUserSecrets(SecretPaginatedRequest.newBuilder().build()).success)
+            assertEquals(1, provider.getUserSecretsCalls.get())
+
+            tokenRegistry.revoke("$DEFAULT_PROCESS.revocable")
 
             val failure =
                 assertFailsWith<StatusException> {
-                    lateAnonymous.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
+                    revocable.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
                 }
             assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
-            assertEquals(0, provider.getUserSecretsCalls.get())
-
-            val response = lateAuthenticated.getUserSecrets(SecretPaginatedRequest.newBuilder().build())
-            assertTrue(response.success)
-            assertEquals(1, provider.getUserSecretsCalls.get())
-
-            lateServer.shutdownNow()
-            assertTrue(lateServer.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals(1, provider.getUserSecretsCalls.get(), "the revoked call must not have reached the vault")
         }
 
     @Test
     fun `shareSecret and unshareSecret refuse an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().shareSecret(ShareSecretProtoRequest.newBuilder().setSecretId("s1").build())
-            }
-            assertFailsWith<StatusException> {
-                anonymousCaller().unshareSecret(UnshareSecretProtoRequest.newBuilder().setSecretId("s1").build())
-            }
+            val shareFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().shareSecret(ShareSecretProtoRequest.newBuilder().setSecretId("s1").build())
+                }
+            val unshareFailure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().unshareSecret(UnshareSecretProtoRequest.newBuilder().setSecretId("s1").build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, shareFailure.status.code)
+            assertEquals(Status.Code.PERMISSION_DENIED, unshareFailure.status.code)
             assertEquals(0, provider.shareSecretCalls.get())
             assertEquals(0, provider.unshareSecretCalls.get())
         }
@@ -234,9 +284,11 @@ class SecretServiceBridgeTest {
     @Test
     fun `getSecretShares refuses an anonymous caller`() =
         runBlocking {
-            assertFailsWith<StatusException> {
-                anonymousCaller().getSecretShares(SecretIdRequest.newBuilder().setId("s1").build())
-            }
+            val failure =
+                assertFailsWith<StatusException> {
+                    anonymousCaller().getSecretShares(SecretIdRequest.newBuilder().setId("s1").build())
+                }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
             assertEquals(0, provider.getSecretSharesCalls.get())
         }
 
@@ -245,8 +297,6 @@ class SecretServiceBridgeTest {
         private const val SHUTDOWN_TIMEOUT_MS = 5_000L
     }
 }
-
-/** Records every call so a refusal test can assert the vault was never actually reached. */
 
 /**
  * A minimal stand-in for [BossIpcServer]'s late-service registry (a grpc-util
@@ -266,6 +316,7 @@ private class SingleServiceRegistry(
     ): ServerMethodDefinition<*, *>? = service.getMethod(fullMethodName)
 }
 
+/** Records every call so a refusal test can assert the vault was never actually reached. */
 private class FakeSecretDataProvider : SecretDataProvider {
     val getUserSecretsCalls = AtomicInteger(0)
     val getUserSecretsWithSharingCalls = AtomicInteger(0)
