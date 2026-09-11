@@ -4,7 +4,10 @@
     "jose": "npm:jose@6.1.0",
     "@std/assert": "jsr:@std/assert@1.0.14"
   },
-  "tasks": { "test": "deno test --allow-env --allow-read", "check": "deno check index.ts" },
+  "tasks": {
+    "test": "deno test --frozen --allow-env --allow-read",
+    "check": "deno fmt --check && deno check --frozen index.ts tests/*.test.ts"
+  },
   "compilerOptions": { "strict": true },
   "fmt": { "semiColons": false, "lineWidth": 100 }
 }

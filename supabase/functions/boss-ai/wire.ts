@@ -91,6 +91,22 @@ export function endpoint(connection: Connection): string {
     (connection.api_type === "openai_chat" ? "/chat/completions" : "/responses")
 }
 
+/** Validate at the secret lookup itself, independent of endpoint call ordering. */
+export function upstreamKey(
+  connection: Connection,
+  read: (name: string) => string | undefined,
+): string {
+  if (
+    !/^BOSS_AI_[A-Z0-9_]+$/.test(connection.api_key_secret) ||
+    connection.api_key_secret === "BOSS_AI_SIGNING_SECRET"
+  ) {
+    throw new HttpError(503, "configuration", "BOSS AI is temporarily unavailable.")
+  }
+  const key = read(connection.api_key_secret)
+  if (!key) throw new HttpError(503, "configuration", "BOSS AI is temporarily unavailable.")
+  return key
+}
+
 export function requestBody(input: Obj, model: Model, type: Connection["api_type"]): Obj {
   const allowed = new Set([
     "model",
@@ -113,6 +129,11 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
   if (input.stream !== undefined && typeof input.stream !== "boolean") throw invalid()
   const messages = input.messages.map((value) => {
     const m = object(value)
+    if (
+      m.name !== undefined && (typeof m.name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(m.name))
+    ) {
+      throw invalid()
+    }
     if (!["system", "developer", "user", "assistant", "tool"].includes(String(m.role))) {
       throw invalid()
     }
@@ -153,6 +174,12 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       (!Array.isArray(m.tool_calls) || !model.capabilities.includes("tools"))
     ) throw invalid()
     if (Array.isArray(m.tool_calls)) m.tool_calls.forEach(functionCall)
+    if (
+      m.role === "tool" && (m.content === null ||
+        (Array.isArray(m.content) && m.content.some((part) => object(part).type !== "text")))
+    ) {
+      throw invalid()
+    }
     return m
   })
   const max = input.max_completion_tokens ?? input.max_tokens ??
@@ -236,7 +263,10 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
   const items: Obj[] = []
   for (const m of messages) {
     if (m.role === "tool") {
-      items.push({ type: "function_call_output", call_id: m.tool_call_id, output: m.content })
+      const output = typeof m.content === "string"
+        ? m.content
+        : (m.content as Obj[]).map((part) => part.text).join("")
+      items.push({ type: "function_call_output", call_id: m.tool_call_id, output })
       continue
     }
     if (m.content !== null && m.content !== "") {

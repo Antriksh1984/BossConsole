@@ -19,6 +19,10 @@ SELECT throws_ok($$UPDATE public.boss_ai_connections SET api_key_secret='BOSS_AI
  WHERE id='pgtap'$$, '23514', NULL, 'signing secret cannot become an upstream key');
 
 SET LOCAL ROLE service_role;
+SELECT ok(public.boss_ai_lookup('ba000000-0000-4000-8000-000000000001','pgtap') ? 'model',
+ 'authorized service-role preflight returns configuration');
+SELECT is((SELECT count(*) FROM public.boss_ai_requests WHERE model_id='pgtap'),0::bigint,
+ 'preflight creates no accounting rows');
 SELECT is((SELECT count(*) FROM public.boss_ai_connections WHERE id='pgtap'),1::bigint,
  'real service role can read RLS-protected routing');
 SELECT ok(public.boss_ai_reserve('ba000000-0000-4000-8000-000000000001','pgtap',
@@ -41,6 +45,8 @@ SELECT public.boss_ai_settle('bb000000-0000-4000-8000-000000000001',99999999999)
 SELECT is((SELECT charged_tokens FROM public.boss_ai_requests
  WHERE id='bb000000-0000-4000-8000-000000000001'),1024::bigint,'upstream usage cannot exceed the admitted bound');
 SELECT public.boss_ai_settle('bb000000-0000-4000-8000-000000000002',7);
+SELECT throws_ok($$SELECT public.boss_ai_settle('bb000000-0000-4000-8000-000000000002',-1)$$,
+ 'P0001','Invalid usage','negative settlement is rejected');
 SELECT public.boss_ai_settle('bb000000-0000-4000-8000-000000000002',0);
 SELECT is((SELECT charged_tokens FROM public.boss_ai_requests
  WHERE id='bb000000-0000-4000-8000-000000000002'),7::bigint,'settlement is first-writer-wins');
@@ -86,6 +92,8 @@ DELETE FROM public.role_permissions WHERE permission_id=(SELECT id FROM public.p
 SELECT is(public.boss_ai_policy('ba000000-0000-4000-8000-000000000001','pgtap'),NULL::jsonb,
  'revoking the real baseline grant takes effect immediately');
 SET LOCAL ROLE authenticated;
+SELECT throws_ok($$SELECT public.boss_ai_lookup('ba000000-0000-4000-8000-000000000001','pgtap')$$,
+ '42501',NULL,'authenticated cannot read upstream config through preflight');
 SELECT throws_ok('SELECT * FROM public.boss_ai_connections','42501',NULL,'authenticated cannot read keys/routing');
 SELECT throws_ok($$SELECT public.boss_ai_catalog('ba000000-0000-4000-8000-000000000001')$$,
  '42501',NULL,'authenticated cannot impersonate a catalog user');

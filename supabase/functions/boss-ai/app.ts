@@ -9,6 +9,7 @@ import {
   readJson,
   requestBody,
   StreamAdapter,
+  upstreamKey,
 } from "./wire.ts"
 
 export interface Dependencies {
@@ -76,6 +77,15 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (typeof input.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(input.model)) {
         throw new HttpError(400, "invalid_model", "Choose a published BOSS model.")
       }
+      phase = "validation"
+      const lookup = await deps.rpc("boss_ai_lookup", {
+        p_user_id: user,
+        p_model_id: input.model,
+      }) as { model: Model; connection: Connection } | null
+      if (!lookup) {
+        throw new HttpError(403, "forbidden", "This model is not available for your account.")
+      }
+      requestBody(input, lookup.model, lookup.connection.api_type)
       phase = "reservation"
       const result = await deps.rpc("boss_ai_reserve", {
         p_user_id: user,
@@ -83,6 +93,9 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         p_request_id: requestId,
       }) as { error?: string; model: Model; connection: Connection }
       if (result.error) {
+        if (result.error === "duplicate") {
+          throw new HttpError(409, "duplicate", "This request has already been admitted.")
+        }
         if (result.error === "forbidden") {
           throw new HttpError(403, "forbidden", "This model is not available for your account.")
         }
@@ -98,8 +111,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       reservation = requestId
       const body = requestBody(input, result.model, result.connection.api_type)
       const url = endpoint(result.connection)
-      const apiKey = deps.secret(result.connection.api_key_secret)
-      if (!apiKey) throw new HttpError(503, "configuration", "BOSS AI is temporarily unavailable.")
+      const apiKey = upstreamKey(result.connection, deps.secret)
       // Never follow redirects with an upstream credential. Only configured servers
       // receive it; request-supplied routing and provider overrides are rejected.
       const abort = new AbortController()

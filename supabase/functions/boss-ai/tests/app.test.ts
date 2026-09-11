@@ -12,6 +12,7 @@ async function fixture(options: {
   failFirstSettlement?: boolean
   failFetch?: boolean
   hang?: boolean
+  stallStream?: boolean
   keyName?: string
   apiType?: "openai_chat" | "openai_responses"
 } = {}) {
@@ -36,8 +37,8 @@ async function fixture(options: {
       if (name === "boss_ai_catalog") {
         return [{ id: "boss-test", allowance: { day: { remaining: 1024 } } }]
       }
-      if (name === "boss_ai_reserve") {
-        return options.deny ? { error: options.deny } : {
+      if (name === "boss_ai_reserve" || name === "boss_ai_lookup") {
+        return options.deny && name === "boss_ai_reserve" ? { error: options.deny } : {
           model: {
             id: "boss-test",
             upstream_model: "private-model",
@@ -65,17 +66,25 @@ async function fixture(options: {
         })
       }
       return new Response(
-        options.stream ??
-          JSON.stringify(
-            options.payload ?? {
-              choices: [{
-                message: { role: "assistant", content: "hello" },
-                finish_reason: "stop",
-                index: 0,
-              }],
-              usage: { prompt_tokens: 2, completion_tokens: 3 },
+        options.stallStream
+          ? new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'),
+              )
             },
-          ),
+          })
+          : options.stream ??
+            JSON.stringify(
+              options.payload ?? {
+                choices: [{
+                  message: { role: "assistant", content: "hello" },
+                  finish_reason: "stop",
+                  index: 0,
+                }],
+                usage: { prompt_tokens: 2, completion_tokens: 3 },
+              },
+            ),
         { status: options.upstreamStatus ?? 200 },
       )
     },
@@ -144,9 +153,35 @@ Deno.test("server-selected endpoint, model and key; actual usage settlement", as
   assert(response.headers.get("x-request-id"))
 })
 
-Deno.test("invalid inputs refund reservations without inference", async () => {
+Deno.test("invalid inputs never create accounting reservations", async () => {
   const f = await fixture()
-  assertEquals((await f.handler(f.request({ ...body, provider: "attacker" }))).status, 400)
+  for (
+    const invalid of [{ model: body.model }, { ...body, provider: "attacker" }, {
+      ...body,
+      messages: [{ role: "user", name: {}, content: "text" }],
+    }, {
+      ...body,
+      messages: [{
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "data:image/png;base64,YQ==" } }],
+      }],
+    }]
+  ) {
+    assertEquals((await f.handler(f.request(invalid))).status, 400)
+  }
+  assert(f.calls.every((call) => call.name === "boss_ai_lookup"))
+  assertEquals(f.requests.length, 0)
+})
+
+Deno.test("duplicate admission is a conflict and pre-dispatch abort refunds without fetch", async () => {
+  const duplicate = await fixture({ deny: "duplicate" })
+  assertEquals((await duplicate.handler(duplicate.request(body))).status, 409)
+  assertEquals(duplicate.requests.length, 0)
+  const f = await fixture()
+  const abort = new AbortController()
+  abort.abort()
+  const response = await f.handler(new Request(f.request(body), { signal: abort.signal }))
+  assertEquals(response.status, 499)
   assertEquals(f.calls.at(-1)?.params.p_tokens, 0)
   assertEquals(f.requests.length, 0)
 })
@@ -157,6 +192,17 @@ Deno.test("truncated streams report failure and retain reserved usage", async ()
   const output = await response.text()
   assert(output.includes("stream_failed"))
   assert(!output.includes("[DONE]"))
+  assertEquals(f.calls.at(-1)?.params.p_tokens, null)
+})
+
+Deno.test("a stalled SSE body times out and settles without hanging the client", async () => {
+  const f = await fixture({ stallStream: true })
+  const response = await f.handler(f.request({ ...body, stream: true }))
+  const output = await response.text()
+  assert(output.includes("partial"))
+  assert(output.includes("stream_failed"))
+  assert(!output.includes("[DONE]"))
+  assertEquals(f.calls.filter((call) => call.name === "boss_ai_settle").length, 1)
   assertEquals(f.calls.at(-1)?.params.p_tokens, null)
 })
 

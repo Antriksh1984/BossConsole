@@ -7,7 +7,9 @@ cannot be changed by a share.
 
 ## Deployment
 
-1. Apply `20260912000000_boss_ai.sql` and `20260912001000_boss_ai_hardening.sql`.
+1. Apply `20260912000000_boss_ai.sql`, `20260912001000_boss_ai_hardening.sql`, and
+   `20260912002000_boss_ai_validation.sql` in order. Earlier files have already been applied to the
+   preview branch; fixes are forward migrations, not edits to applied history.
 2. Set `BOSS_AI_SIGNING_SECRET` to at least 32 random bytes (encoded as a string). Set upstream API
    keys as secrets named `BOSS_AI_<NAME>`. The signing-secret name is explicitly prohibited as an
    upstream key in both SQL and the handler. Never put these keys in a shared vault entry. Supabase
@@ -99,6 +101,13 @@ assertion inferred from a model name.
 
 ## Allowance semantics
 
+Request validation uses a read-only, permission-filtered preflight before inserting any ledger row.
+Admission rechecks current policy/configuration under its lock, and the handler revalidates against
+the admitted snapshot. Normal malformed/capability-invalid requests create no ledger rows; a
+configuration change between preflight and admission can still require a zero-charge settlement.
+Admission requires READ COMMITTED so the post-lock usage recount sees earlier admissions. Other
+transaction isolation levels are refused explicitly.
+
 For each model, use the maximum allowance from matching permissions for each period, never the sum.
 Every configured period applies. Days, ISO weeks starting Monday, and months reset at their UTC
 calendar boundaries. Usage belongs to the request's admission period and is never reset by a
@@ -161,13 +170,24 @@ requests, concurrent-slot limits, allowance aggregation and settlement. CI also 
 `supabase/tests/boss_ai_test.sql` against the complete migrated Supabase/RBAC schema, covering real
 service-role access, denied client grants, bans, connection revocation, lease expiry and UTC period
 boundaries. `scripts/test/test-boss-ai-concurrency.py` holds one PostgreSQL transaction open while
-proving a second session waits on the advisory lock, then verifies it cannot overspend.
+proving a second session waits on the advisory lock, then verifies it cannot overspend. The same
+script refuses REPEATABLE READ/SERIALIZABLE and derives the local container name from
+`supabase/config.toml`. Run it from the repository with Python 3.11+ after `supabase start` to
+repeat the real concurrency proof locally. Use a disposable local database; a hard-killed test may
+leave fixtures, so discard that test database before retrying. Cleanup failures preserve the
+original error. The committed dependency lockfile is enforced by both Deno tasks; `check` also
+checks formatting and type-checks the test modules.
 
 SSE requires the protocol's completed event (`[DONE]` for Chat Completions) and complete data
 frames. A non-null finish reason alone is not enough: usage can arrive in a subsequent chunk.
 Trailing comments are harmless, but partial data frames are failures. Browser CORS and desktop
 executable attestation are intentionally not supplied. Production gateway rate limits should also
-cover `/auth/token`; authenticated model quotas are not a substitute for HTTP abuse protection.
+cover `/auth/token`; authenticated model quotas are not a substitute for HTTP abuse protection. This
+also applies to valid requests rejected by the upstream: refunded token reservations do not limit
+request frequency or ledger growth. Operators must configure request-rate protection before
+publishing models. A redirecting upstream URL is a configuration error with unknown inference
+outcome, so it retains the reservation just like other ambiguous fetch failures; validate the final
+URL first.
 
 Wire contracts were checked against:
 

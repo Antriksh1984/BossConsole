@@ -5,9 +5,14 @@ waiting on the advisory lock. No timing sleep is used as evidence of serializati
 """
 import json
 import subprocess
+import sys
 import time
+import tomllib
+from pathlib import Path
 
-PSQL = ["docker", "exec", "-i", "supabase_db_boss-main", "psql", "-XqAt",
+with (Path(__file__).resolve().parents[2] / "supabase/config.toml").open("rb") as config:
+    project_id = tomllib.load(config)["project_id"]
+PSQL = ["docker", "exec", "-i", f"supabase_db_{project_id}", "psql", "-XqAt",
         "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"]
 USER = "bc000000-0000-4000-8000-000000000001"
 FIRST = "bd000000-0000-4000-8000-000000000001"
@@ -29,6 +34,11 @@ try:
         VALUES('concurrency-test','Test','concurrency-test','private',1024,128,true);
       INSERT INTO public.boss_ai_allowances VALUES('concurrency-test','ai.use',1024,1024,1024,2);
     """)
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE"]:
+        rejected = subprocess.run(PSQL + ["-c",
+            f"BEGIN ISOLATION LEVEL {isolation}; SELECT public.boss_ai_reserve('{USER}','concurrency-test','{FIRST}');"],
+            capture_output=True, text=True, timeout=15)
+        assert rejected.returncode != 0 and "requires READ COMMITTED" in rejected.stderr, rejected.stderr
     first = subprocess.Popen(PSQL, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, bufsize=1)
     first.stdin.write(f"BEGIN; SET LOCAL statement_timeout='10s';\n"
@@ -58,14 +68,21 @@ try:
     assert query(f"SELECT sum(charged_tokens) FROM public.boss_ai_requests WHERE user_id='{USER}'") == "1024"
     print("PASS: concurrent sessions serialize admission and cannot overspend the allowance")
 finally:
-    for process in [first, second]:
-        if process and process.poll() is None:
-            process.kill()
-            process.communicate(timeout=15)
-    query(f"""
+    original_failure = sys.exc_info()[0] is not None
+    try:
+        for process in [first, second]:
+            if process and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=15)
+        query(f"""
+      SET statement_timeout='5s'; SET lock_timeout='3s';
       DELETE FROM public.boss_ai_requests WHERE user_id='{USER}';
       DELETE FROM public.boss_ai_allowances WHERE model_id='concurrency-test';
       DELETE FROM public.boss_ai_models WHERE id='concurrency-test';
       DELETE FROM public.boss_ai_connections WHERE id='concurrency-test';
       DELETE FROM auth.users WHERE id='{USER}';
-    """)
+        """)
+    except Exception:
+        if not original_failure:
+            raise
+        print("Cleanup also failed; preserving the original test failure. Discard this disposable DB.", file=sys.stderr)

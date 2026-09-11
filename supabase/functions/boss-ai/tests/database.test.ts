@@ -29,6 +29,11 @@ Deno.test("database policy, reservations, settlement, revocation and grants", as
       ),
     )
     const user = "00000000-0000-0000-0000-000000000001"
+    await db.exec(
+      await Deno.readTextFile(
+        new URL("../../../migrations/20260912002000_boss_ai_validation.sql", import.meta.url),
+      ),
+    )
     const other = "00000000-0000-0000-0000-000000000002"
     await db.exec(`
       INSERT INTO auth.users(id) VALUES('${user}'),('${other}');

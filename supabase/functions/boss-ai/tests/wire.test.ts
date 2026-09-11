@@ -7,6 +7,7 @@ import {
   readJson,
   requestBody,
   StreamAdapter,
+  upstreamKey,
   usage,
 } from "../wire.ts"
 import { bearer, HttpError } from "../auth.ts"
@@ -18,6 +19,40 @@ const model: Model = {
   context_length: 4096,
   max_output_tokens: 512,
 }
+
+Deno.test("Responses tool results normalize text arrays and reject null or images", () => {
+  const request = (content: unknown) =>
+    requestBody(
+      {
+        messages: [{ role: "tool", tool_call_id: "call-1", content }],
+      },
+      model,
+      "openai_responses",
+    )
+  assertEquals(request([{ type: "text", text: "first" }, { type: "text", text: "second" }]).input, [
+    { type: "function_call_output", call_id: "call-1", output: "firstsecond" },
+  ])
+  assertThrows(() => request(null))
+  assertThrows(() =>
+    request([{ type: "image_url", image_url: { url: "data:image/png;base64,YQ==" } }])
+  )
+})
+
+Deno.test("upstream secret lookup is safe without calling endpoint first", () => {
+  let reads = 0
+  for (const api_key_secret of ["BOSS_AI_SIGNING_SECRET", "SUPABASE_SERVICE_ROLE_KEY"]) {
+    assertThrows(() =>
+      upstreamKey(
+        { base_url: "https://example.com", api_type: "openai_chat", api_key_secret },
+        () => {
+          reads++
+          return "forbidden"
+        },
+      )
+    )
+  }
+  assertEquals(reads, 0)
+})
 const input = { model: model.id, messages: [{ role: "user", content: "hello" }] }
 
 Deno.test("routing overrides and unadvertised capabilities are refused", () => {
