@@ -63,7 +63,13 @@ object BrowserSettingsManager {
      */
     fun ensureLoaded() { /* referencing this object already ran loadSettingsSync() */ }
 
-    /** Test seam: re-run the synchronous load so a [saveSettings] is visible without a process restart. */
+    /**
+     * Test seam: re-run the synchronous load so a [saveSettings] is visible without a process restart.
+     *
+     * Named for the [DefaultAppsSettingsManager.resetForTest] precedent but with deliberately
+     * different semantics: this one does not reset to defaults, it re-reads. A failed load keeps
+     * the in-memory values rather than clobbering them, like [loadSettingsSync] does at startup.
+     */
     internal fun reloadForTest() {
         loadSettingsSync()
     }
