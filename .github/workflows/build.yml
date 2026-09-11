@@ -380,6 +380,17 @@ jobs:
           
           echo "✅ Auto-update integration test passed"
 
+  boss-ai-tests:
+    name: BOSS AI contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno task check && deno task test
+        working-directory: supabase/functions/boss-ai
+
   database-tests:
     name: 🧪 Database (pgTAP)
     runs-on: ubuntu-latest

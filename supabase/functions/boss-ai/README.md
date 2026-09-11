@@ -1,0 +1,146 @@
+# Managed BOSS AI
+
+The function owns inference routing, authorization and per-user/model allowances. Secret Manager
+discovers the provider from a shared vault definition. It does not ship a BOSS AI provider entry or
+an upstream API key. The host registers only the trusted `boss-ai` credential broker, whose endpoint
+cannot be changed by a share.
+
+## Deployment
+
+1. Apply `20260912000000_boss_ai.sql`.
+2. Set `BOSS_AI_SIGNING_SECRET` to at least 32 random bytes (encoded as a string). Set upstream API
+   keys as secrets named `BOSS_AI_<NAME>`. Never put these keys in a shared vault entry. Supabase
+   supplies its URL and service-role key.
+3. Deploy `boss-ai` using this repository's `supabase/config.toml`. `verify_jwt=false` is required
+   because the handler verifies two distinct credentials: BOSS sessions on `/auth/token`, AI-scoped
+   tokens elsewhere.
+4. Configure one or more connections, models, and permission allowances using the SQL editor or
+   service-role administration. No client role can read/write these tables or impersonate a user
+   through the accounting RPCs.
+5. Create the shared definition below in Secret Manager and share it read-only with the baseline
+   `user` role. Only an administrator with role-sharing permission can do this. The owner retains
+   editing control.
+6. Install a host build with the broker registration and the updated Secret Manager plugin. Existing
+   AI Gateway Chat Completions transport is sufficient.
+
+No migration publishes a made-up model, invents an API key, or picks an allowance. Those are
+required deployment inputs. Plugin bundling is outside this change.
+
+## Shared vault definition
+
+Create a normal secret with website/name `BOSS AI`, username `BOSS sign-in`, password
+`Managed by BOSS` (an inert placeholder, never used as a credential), tag `ai-provider-definition`,
+and these notes:
+
+```json
+{
+  "schema": "boss-managed-provider-v1",
+  "name": "BOSS AI",
+  "brokerId": "boss-ai",
+  "baseUrl": "https://api.risaboss.com/functions/v1/boss-ai/v1",
+  "defaultForNewUsers": true
+}
+```
+
+The provider identity is derived from the secret's UUID, so renaming the shared entry does not lose
+selections. Users' model choices are local preferences and never modify the shared definition. A
+shared note can reference only a broker known to the host and endpoints within that broker's
+declared scope. A forged share cannot send a login token or a broker credential to an arbitrary URL.
+
+Share with `user` to distribute to everyone, or use existing user/role/organisation sharing for
+narrower distribution. Availability of a definition and permission to spend on a model are separate:
+inference always rechecks the model's live policy. The `ai.use` permission is granted to the
+baseline user role by the migration. Additional allowance permissions use the existing RBAC
+administration.
+
+## Server configuration example
+
+This is a template, not an automatically applied seed. Replace the upstream model and all limits
+with the approved production values; verify capabilities against the actual endpoint before setting
+`published=true`.
+
+```sql
+INSERT INTO public.boss_ai_connections
+  (id, base_url, api_key_secret, api_type)
+VALUES ('openrouter', 'https://openrouter.ai/api/v1',
+        'BOSS_AI_OPENROUTER', 'openai_chat');
+
+INSERT INTO public.boss_ai_models
+  (id, display_name, connection_id, upstream_model, capabilities,
+   context_length, max_output_tokens, published, is_default)
+VALUES ('boss-general', 'BOSS General', 'openrouter', '<upstream-model-id>',
+        ARRAY['text','tools'], 32768, 4096, false, true);
+
+INSERT INTO public.boss_ai_allowances
+  (model_id, permission_name, tokens_per_day, tokens_per_week, tokens_per_month)
+VALUES ('boss-general', 'ai.use', 100000, 500000, 2000000);
+```
+
+Repeat the model and allowance inserts to publish multiple models. Connections may use `openai_chat`
+or `openai_responses`; the base URL includes the API version prefix, not `/chat/completions` or
+`/responses`. Modify mappings in a transaction; each admitted request keeps its captured routing
+configuration. Unpublish to stop new requests. In-flight requests are allowed to finish.
+
+The Responses adapter translates client function calls, results, structured output and SSE events
+to/from Chat Completions. It requests `store=false` and disables Responses truncation. No
+upstream-hosted tools, conversation IDs, client-selected providers, redirects, or arbitrary request
+extensions are forwarded. Vision accepts inline PNG/JPEG/WebP images, not remote image URLs. The
+endpoint must enforce the configured context limit; this is part of the upstream contract, not an
+assertion inferred from a model name.
+
+## Allowance semantics
+
+For each model, use the maximum allowance from matching permissions for each period, never the sum.
+Every configured period applies. Days, ISO weeks starting Monday, and months reset at their UTC
+calendar boundaries. Usage belongs to the request's admission period and is never reset by a
+permission change.
+
+Admission reserves the model's entire configured context allowance, including input, output and
+reasoning. This conservative bound works across upstream tokenizers and inline images without
+trusting client token estimates. It means a request needs that much remaining capacity even if its
+eventual usage is small. Set context limits and allowances together. Actual provider-reported input
+plus output tokens replace the reservation on settlement; reasoning is already included in output
+and is not counted twice. Unknown or interrupted outcomes retain the full charge. A rejected
+pre-inference request releases it.
+
+Requests are limited to four minutes, below the five-minute concurrency lease. A worker crash leaves
+the charge in place but releases its concurrency slot after the lease. Usage rows should be retained
+for accounting; archival must preserve all rows contributing to any current period. Missing usage is
+never treated as zero. `/usage` returns model allowances, usage and reset timestamps.
+
+| State                                              | Admission/accounting behavior                              |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| Missing/invalid BOSS login                         | Token exchange returns 401                                 |
+| Wrong audience, expired or forged AI credential    | No catalog or inference access                             |
+| Permission revoked, user banned, model unpublished | New inference returns 403                                  |
+| Multiple active requests                           | Atomic per-user/model reservation prevents double spending |
+| Client disconnected / worker interrupted           | Full reservation retained                                  |
+| Successful result with usage                       | Charge input plus output once                              |
+| Retried settlement                                 | First settlement wins                                      |
+| Role allowance reduced                             | Existing usage survives; further requests may be refused   |
+
+AI credentials last five minutes and renew automatically. BOSS sign-out clears the client cache. A
+copied token may remain usable until expiry; this mechanism authenticates a BOSS-issued session, not
+the executable making the request. Live permissions and bans are checked on catalog/inference
+requests. App attestation and device-bound signing are not implemented.
+
+No inference content or credentials are logged. Errors use owned messages. The only error log
+contains a request UUID when settlement fails; the reserved charge remains in the database. No
+automatic cross-provider fallback is enabled.
+
+## Verification
+
+Run `deno task check` and `deno task test` in this directory. The database test runs the migration
+in PostgreSQL/WASM with an auth/RBAC fixture, including grants, permission revocation, duplicate
+requests, concurrent-slot limits, allowance aggregation and settlement. It does not emulate separate
+concurrent database sessions; test that deployment behavior against staging PostgreSQL before
+launch.
+
+Wire contracts were checked against:
+
+- https://developers.openai.com/api/docs/guides/function-calling
+- https://developers.openai.com/api/docs/guides/streaming-responses
+- https://supabase.com/docs/guides/functions/limits
+
+Live upstream compatibility, project migrations, and the real role-sharing flow still require
+staging credentials and configured models before production rollout.
