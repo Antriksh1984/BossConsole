@@ -40,6 +40,16 @@ function escapeJsString(value: string): string {
     .replace(/\n/g, "\\n")
 }
 
+/**
+ * Every template value is substituted with a *function* replacement
+ * (`() => value`) below rather than a plain string: `String.prototype.replace`
+ * applies `$`-pattern expansion (`$$`, `$&`, `` $` ``, `$'`) to the replacement
+ * string, and that happens *after* escaping. A sessionId of `$&` would echo the
+ * raw placeholder back into the page, and `` $` `` would splice the entire
+ * pre-match document into the string literal and kill the inline script. The
+ * function form returns the escaped value verbatim.
+ */
+
 const REGISTRATION_TEMPLATE = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1138,14 +1148,14 @@ export async function getMobileRegistrationHTML(
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
 
   return REGISTRATION_TEMPLATE
-    .replace(/{{EMAIL_HTML}}/g, escapeHtml(email))
-    .replace(/{{CHALLENGE_JS}}/g, escapeJsString(challenge))
-    .replace(/{{USER_ID_JS}}/g, escapeJsString(userId))
-    .replace(/{{EMAIL_JS}}/g, escapeJsString(email))
-    .replace(/{{SESSION_ID_JS}}/g, escapeJsString(sessionId))
-    .replace(/{{RP_ID_JS}}/g, escapeJsString(rpId))
-    .replace(/{{RP_NAME_JS}}/g, escapeJsString(rpName))
-    .replace(/{{ANON_KEY_JS}}/g, escapeJsString(anonKey));
+    .replace(/{{EMAIL_HTML}}/g, () => escapeHtml(email))
+    .replace(/{{CHALLENGE_JS}}/g, () => escapeJsString(challenge))
+    .replace(/{{USER_ID_JS}}/g, () => escapeJsString(userId))
+    .replace(/{{EMAIL_JS}}/g, () => escapeJsString(email))
+    .replace(/{{SESSION_ID_JS}}/g, () => escapeJsString(sessionId))
+    .replace(/{{RP_ID_JS}}/g, () => escapeJsString(rpId))
+    .replace(/{{RP_NAME_JS}}/g, () => escapeJsString(rpName))
+    .replace(/{{ANON_KEY_JS}}/g, () => escapeJsString(anonKey));
 }
 
 export async function getMobileAuthenticationHTML(
@@ -1161,17 +1171,17 @@ export async function getMobileAuthenticationHTML(
   const createdAtFormatted = new Date(credentialCreatedAt).toLocaleDateString();
 
   return AUTHENTICATION_TEMPLATE
-    .replace(/{{EMAIL_HTML}}/g, escapeHtml(email))
-    .replace(/{{CREDENTIAL_DISPLAY_NAME_HTML}}/g, escapeHtml(credentialDisplayName))
-    .replace(/{{CREDENTIAL_CREATED_AT_HTML}}/g, escapeHtml(createdAtFormatted))
-    .replace(/{{CHALLENGE_JS}}/g, escapeJsString(challenge))
-    .replace(/{{EMAIL_JS}}/g, escapeJsString(email))
-    .replace(/{{SESSION_ID_JS}}/g, escapeJsString(sessionId))
-    .replace(/{{RP_ID_JS}}/g, escapeJsString(rpId))
-    .replace(/{{CREDENTIAL_ID_JS}}/g, escapeJsString(credentialId))
-    .replace(/{{ANON_KEY_JS}}/g, escapeJsString(anonKey));
+    .replace(/{{EMAIL_HTML}}/g, () => escapeHtml(email))
+    .replace(/{{CREDENTIAL_DISPLAY_NAME_HTML}}/g, () => escapeHtml(credentialDisplayName))
+    .replace(/{{CREDENTIAL_CREATED_AT_HTML}}/g, () => escapeHtml(createdAtFormatted))
+    .replace(/{{CHALLENGE_JS}}/g, () => escapeJsString(challenge))
+    .replace(/{{EMAIL_JS}}/g, () => escapeJsString(email))
+    .replace(/{{SESSION_ID_JS}}/g, () => escapeJsString(sessionId))
+    .replace(/{{RP_ID_JS}}/g, () => escapeJsString(rpId))
+    .replace(/{{CREDENTIAL_ID_JS}}/g, () => escapeJsString(credentialId))
+    .replace(/{{ANON_KEY_JS}}/g, () => escapeJsString(anonKey));
 }
 
 export async function getMobileErrorHTML(message: string): Promise<string> {
-  return ERROR_TEMPLATE.replace(/{{MESSAGE_HTML}}/g, escapeHtml(message));
+  return ERROR_TEMPLATE.replace(/{{MESSAGE_HTML}}/g, () => escapeHtml(message));
 }

@@ -150,6 +150,57 @@ Deno.test({
 })
 
 Deno.test({
+  name: "dollar replacement patterns are inert in every template",
+  async fn() {
+    // String.prototype.replace applies `$`-pattern expansion ($$, $&, `` $` ``,
+    // $') to *string* replacement values, and that expansion runs after
+    // escaping. A `$&` sessionId would echo the raw placeholder back into the
+    // page and `` $` `` would splice the entire pre-match document into the
+    // string literal, killing the inline script. These values must survive
+    // substitution verbatim.
+    const reg = await getMobileRegistrationHTML(
+      "challenge-abc",
+      "user-123",
+      "victim@example.com",
+      "$&",
+      "api.risaboss.com",
+      "$$",
+    )
+    assertStringIncludes(reg, "const sessionId = '$&';")
+    assertStringIncludes(reg, "const rpName = '$$';")
+    assertEquals(reg.includes("{{SESSION_ID_JS}}"), false)
+
+    const splice = await getMobileRegistrationHTML(
+      "challenge-abc",
+      "user-123",
+      "victim@example.com",
+      "$`",
+      "api.risaboss.com",
+      "BOSS",
+    )
+    assertStringIncludes(splice, "const sessionId = '$`';")
+    // the pre-match document must not be spliced into the string literal
+    assertEquals((splice.match(/const challenge = 'challenge-abc';/g) ?? []).length, 1)
+
+    const auth = await getMobileAuthenticationHTML(
+      "challenge-abc",
+      "victim@example.com",
+      "$&",
+      "api.risaboss.com",
+      "credential-abc",
+      "$$",
+      Date.now(),
+    )
+    assertStringIncludes(auth, "const sessionId = '$&';")
+    assertStringIncludes(auth, "<span class=\"value\">$$</span>")
+
+    const err = await getMobileErrorHTML("$&")
+    assertEquals(err.includes("{{MESSAGE_HTML}}"), false)
+    assertStringIncludes(err, "$&")
+  },
+})
+
+Deno.test({
   name: "cleanup",
   fn: restoreAnonKey,
   sanitizeOps: false,
