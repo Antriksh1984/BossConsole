@@ -24,10 +24,16 @@ import kotlinx.coroutines.launch
  * subscribes to [ProjectState.recentProjects] - a process-wide singleton, not this window's own
  * state - so it outlives the window unless [dispose] cancels it (BossConsole#520).
  *
- * [dispose] is safe even in KERNEL mode, where the instance is also handed to the
- * process-wide [ai.rever.boss.kernel.services.ProjectDataServiceBridge]: that bridge reads
- * [ProjectState.recentProjects] directly rather than this per-window [recentProjects] mirror,
- * so cancelling the mirror at window close cannot freeze a KERNEL client's stream.
+ * [dispose] cannot freeze a KERNEL client's watch stream, even though in KERNEL mode the
+ * instance is also handed to the process-wide
+ * [ai.rever.boss.kernel.services.ProjectDataServiceBridge]: that bridge reads
+ * [ProjectState.recentProjects] directly rather than this per-window [recentProjects]
+ * mirror, so cancelling the mirror at window close leaves the watched source untouched.
+ *
+ * What [dispose] does not cover (pre-existing, not introduced here): the bridge's write
+ * path still routes [selectProject] through this per-window instance, so a select that
+ * arrives after the owning window closes is a no-op. Closing that gap means giving the
+ * write path its own window-affinity rule - a separate change.
  */
 class ProjectDataProviderImpl(
     private val windowProjectState: WindowProjectState?,

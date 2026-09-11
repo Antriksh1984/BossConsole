@@ -5,11 +5,16 @@ import ai.rever.boss.ipc.proto.Empty
 import ai.rever.boss.ipc.proto.services.ProjectProto
 import ai.rever.boss.plugin.api.ProjectData
 import ai.rever.boss.plugin.api.ProjectDataProvider
+import ai.rever.boss.window.Project
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.nio.file.Files
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -67,32 +72,77 @@ class ProjectDataServiceBridgeTest {
     @Test
     fun `watchRecentProjects reflects the process-wide ProjectState, not the per-window provider`() =
         runBlocking {
-            // Read-only against the real [ProjectState] singleton (whatever the running
-            // process's actual recent-projects list happens to be) rather than mutating it -
-            // a test writing through `ProjectState.updateRecentProjects` would persist to
-            // this machine's real `recent-projects.json`. The fake provider's own list is
-            // deliberately different from whatever that is, so a match against [ProjectState]
-            // rather than the fake is what proves the routing.
-            //
-            // [ProjectState] loads its list from disk asynchronously once per JVM, so the
-            // snapshot taken around the emission may straddle that load: the first emission
-            // must equal whichever side of the load it landed on, and both sides are read
-            // here. On a machine with an empty (or absent) file both sides agree.
-            val decoy = ProjectData(name = "decoy-window-only-project", path = "/nowhere/decoy", lastOpened = 0L)
-            val bridge = ProjectDataServiceBridge(FakeProjectDataProvider(MutableStateFlow(listOf(decoy))))
+            // Seeded, not read-only: under composeApp's test-home isolation (user.home
+            // redirected to a fresh build/test-home per task) the singleton's list is
+            // always empty in the test JVM, so asserting against whatever it happened to
+            // hold was a no-op - an implementation that merely emitted [] passed it.
+            // Seeding makes the assertion check a real value. The write is still safe:
+            // persistence lands in the per-run test home, not the developer's real
+            // recent-projects.json, and the finally below restores the list. The seed's
+            // path is a real directory because ProjectState's one-shot disk load, if it
+            // still runs when the test writes the file, filters out projects whose
+            // directories do not exist.
+            val seedDir = Files.createTempDirectory("boss-bridge-watch-seed").toFile()
+            val secondDir = Files.createTempDirectory("boss-bridge-watch-second").toFile()
+            val seed = Project(name = "boss-bridge-seed", path = seedDir.absolutePath, lastOpened = 0L)
+            val second = Project(name = "boss-bridge-second", path = secondDir.absolutePath, lastOpened = 0L)
+            try {
+                val decoy = ProjectData(name = "decoy-window-only-project", path = "/nowhere/decoy", lastOpened = 0L)
+                val bridge = ProjectDataServiceBridge(FakeProjectDataProvider(MutableStateFlow(listOf(decoy))))
 
-            val before = ProjectState.recentProjects.value.map { it.path }
-            val emitted = bridge.watchRecentProjects(Empty.getDefaultInstance()).first()
-            val after = ProjectState.recentProjects.value.map { it.path }
-            val emittedPaths = emitted.projectsList.map { it.path }
+                awaitInRecentProjects(seed)
+                val expected = ProjectState.recentProjects.value.map { it.path }
+                assertTrue(seed.path in expected, "seed disappeared before the first emission")
 
-            assertTrue(
-                emittedPaths == before || emittedPaths == after,
-                "emitted $emittedPaths matched neither the pre-emission snapshot $before " +
-                    "nor the post-emission snapshot $after",
-            )
-            assertNotEquals(listOf(decoy.path), emittedPaths)
+                // One collection, two emissions: the first pins the routing (the value
+                // equals the process-wide list, not the per-window decoy), the second
+                // pins liveness (a later mutation still reaches a client that keeps
+                // collecting).
+                val emissions = mutableListOf<List<String>>()
+                val collector =
+                    launch {
+                        bridge
+                            .watchRecentProjects(Empty.getDefaultInstance())
+                            .take(2)
+                            .collect { emissions += it.projectsList.map { p -> p.path } }
+                    }
+                withTimeout(5_000) {
+                    while (emissions.size < 1) delay(10)
+                }
+                assertEquals(expected, emissions.getOrNull(0), "first emission must be the process-wide list")
+                assertNotEquals(listOf(decoy.path), emissions.getOrNull(0), "emission came from the per-window mirror")
+
+                ProjectState.updateRecentProjects(second)
+                withTimeout(5_000) {
+                    while (emissions.size < 2) delay(10)
+                }
+                collector.join()
+                assertTrue(
+                    second.path in emissions.getOrNull(1).orEmpty(),
+                    "second emission $emissions did not carry the post-mutation value; the stream is not live",
+                )
+            } finally {
+                ProjectState.removeRecentProject(seed.path)
+                ProjectState.removeRecentProject(second.path)
+                seedDir.deleteRecursively()
+                secondDir.deleteRecursively()
+            }
         }
+
+    /**
+     * Seeds [project] into the real [ProjectState] and returns once it is present. Reseeds on
+     * every poll, because the singleton's one-shot disk load can run once, late, and replace
+     * the whole list with the file's contents; the load happens at most once, so this loop
+     * terminates.
+     */
+    private suspend fun awaitInRecentProjects(project: Project) {
+        withTimeout(5_000) {
+            while (project.path !in ProjectState.recentProjects.value.map { it.path }) {
+                ProjectState.updateRecentProjects(project)
+                delay(10)
+            }
+        }
+    }
 
     private class RecordingProjectDataProvider : ProjectDataProvider {
         override val recentProjects: StateFlow<List<ProjectData>> = MutableStateFlow(emptyList())
@@ -114,7 +164,7 @@ class ProjectDataServiceBridgeTest {
     }
 }
 
-/** A provider whose [recentProjects] is fixed and deliberately unlike [ProjectState]'s real value. */
+/** A provider whose [recentProjects] is fixed and deliberately unlike [ProjectState]'s value. */
 private class FakeProjectDataProvider(
     override val recentProjects: StateFlow<List<ProjectData>>,
 ) : ProjectDataProvider {
