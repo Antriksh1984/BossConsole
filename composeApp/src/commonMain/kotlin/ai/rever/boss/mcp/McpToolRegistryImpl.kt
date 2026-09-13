@@ -744,7 +744,7 @@ internal class McpToolRegistryCore(
             _tools.value.firstOrNull { it.definition.name == toolName }
                 ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
         val args = parseArgs(arguments)
-        val revocation = policyEngine.revocationVersion(toolName)
+        val revocation = policyEngine.revocationVersion(toolName, tool.providerId)
         val policy = policyEngine.policyFor(toolName, tool.providerId)
         val startTime = System.nanoTime()
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
@@ -829,7 +829,7 @@ internal class McpToolRegistryCore(
             if (authorization.second != null) return@withContext authorization
             val toolName = tool.definition.name
             if (!isAvailable(tool) ||
-                policyEngine.revocationVersion(toolName) != revocation ||
+                policyEngine.revocationVersion(toolName, tool.providerId) != revocation ||
                 policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
             ) {
                 return@withContext McpApprovalDisposition.POLICY_DENIED to
@@ -847,7 +847,7 @@ internal class McpToolRegistryCore(
                 return@withContext authorization
             }
             val disposition =
-                if (policyEngine.revocationVersion(toolName) != revocation ||
+                if (policyEngine.revocationVersion(toolName, tool.providerId) != revocation ||
                     policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
                 ) {
                     McpApprovalDisposition.POLICY_DENIED
@@ -871,7 +871,7 @@ internal class McpToolRegistryCore(
             // to running the call. Mirrored again inside setProviderPolicy's own lock below,
             // since this check alone is not atomic with the write that follows it.
             if (!isAvailable(tool) ||
-                policyEngine.revocationVersion(toolName) != revocation ||
+                policyEngine.revocationVersion(toolName, tool.providerId) != revocation ||
                 policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
             ) {
                 return McpApprovalDisposition.POLICY_DENIED to
@@ -899,7 +899,7 @@ internal class McpToolRegistryCore(
             // back to running the call with session trust for this one tool
             // (PROVIDER_TRUST_PERSIST_FAILED) - the former must not run at all, exactly the
             // disambiguation validateApproval already does for the per-tool path.
-            return if (policyEngine.revocationVersion(toolName) != revocation ||
+            return if (policyEngine.revocationVersion(toolName, tool.providerId) != revocation ||
                 policyEngine.policyFor(toolName, tool.providerId) == McpPolicyAction.DENY
             ) {
                 McpApprovalDisposition.POLICY_DENIED to "MCP tool access revoked while awaiting approval"
@@ -920,13 +920,20 @@ internal class McpToolRegistryCore(
     }
 
     private suspend fun persistentDenialDisposition(
-        toolName: String,
+        tool: RegisteredMcpTool,
         revocation: Long,
     ): McpApprovalDisposition =
         withContext(Dispatchers.IO) {
-            if (policyEngine.setToolPolicy(toolName, McpPolicyAction.DENY, expectedRevocation = revocation)) {
+            val toolName = tool.definition.name
+            if (policyEngine.setToolPolicy(
+                    toolName,
+                    McpPolicyAction.DENY,
+                    expectedRevocation = revocation,
+                    providerId = tool.providerId,
+                )
+            ) {
                 McpApprovalDisposition.PERSISTENTLY_DENIED
-            } else if (policyEngine.revocationVersion(toolName) != revocation) {
+            } else if (policyEngine.revocationVersion(toolName, tool.providerId) != revocation) {
                 McpApprovalDisposition.POLICY_DENIED
             } else {
                 McpApprovalDisposition.POLICY_PERSIST_FAILED
@@ -965,7 +972,7 @@ internal class McpToolRegistryCore(
                     is McpApprovalDecision.Denied -> {
                         val disposition =
                             if (decision.persistPolicy) {
-                                persistentDenialDisposition(tool.definition.name, revocation)
+                                persistentDenialDisposition(tool, revocation)
                             } else {
                                 McpApprovalDisposition.DENIED_BY_OPERATOR
                             }

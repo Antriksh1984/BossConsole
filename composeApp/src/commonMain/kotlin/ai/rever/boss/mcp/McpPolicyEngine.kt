@@ -67,6 +67,7 @@ class McpPolicyEngine(
     private val logger = BossLogger.forComponent("McpPolicyEngine")
     private val lock = Any()
     private val revocations = ConcurrentHashMap<String, Long>()
+    private val providerRevocations = ConcurrentHashMap<String, Long>()
     private val json =
         Json {
             ignoreUnknownKeys = true
@@ -83,7 +84,10 @@ class McpPolicyEngine(
     val sessionTrustedTools: StateFlow<Set<String>> = _sessionTrustedTools.asStateFlow()
 
     /** Capture before reading policy; a reset invalidates every older authorization. */
-    internal fun revocationVersion(toolName: String): Long = revocations[toolName] ?: 0L
+    internal fun revocationVersion(
+        toolName: String,
+        providerId: String? = null,
+    ): Long = (revocations[toolName] ?: 0L) + (providerId?.let { providerRevocations[it] } ?: 0L)
 
     /**
      * Final authorization boundary. Session grants and operator resets use the same lock.
@@ -100,7 +104,7 @@ class McpPolicyEngine(
         providerId: String? = null,
     ): Boolean =
         synchronized(lock) {
-            if (revocationVersion(toolName) != expectedRevocation ||
+            if (revocationVersion(toolName, providerId) != expectedRevocation ||
                 policyFor(toolName, providerId) == McpPolicyAction.DENY
             ) {
                 false
@@ -235,7 +239,7 @@ class McpPolicyEngine(
         providerId: String? = null,
     ): Boolean =
         synchronized(lock) {
-            if (expectedRevocation != null && revocationVersion(toolName) != expectedRevocation) {
+            if (expectedRevocation != null && revocationVersion(toolName, providerId) != expectedRevocation) {
                 return@synchronized false
             }
             if (preserveDeny && policyFor(toolName, providerId) == McpPolicyAction.DENY) return@synchronized false
@@ -270,10 +274,15 @@ class McpPolicyEngine(
         toolName: String? = null,
     ): Boolean =
         synchronized(lock) {
-            if (expectedRevocation != null && toolName != null && revocationVersion(toolName) != expectedRevocation) {
+            if (expectedRevocation != null &&
+                (toolName == null || revocationVersion(toolName, providerId) != expectedRevocation)
+            ) {
                 return@synchronized false
             }
-            if (preserveDeny && toolName != null && policyFor(toolName, providerId) == McpPolicyAction.DENY) {
+            if (preserveDeny &&
+                (_config.value.providerRules[providerId] == McpPolicyAction.DENY ||
+                    (toolName != null && policyFor(toolName, providerId) == McpPolicyAction.DENY))
+            ) {
                 return@synchronized false
             }
             applyConfig(
@@ -301,14 +310,18 @@ class McpPolicyEngine(
      */
     fun revokeProviderPolicy(providerId: String): Boolean =
         synchronized(lock) {
-            applyConfig(
-                key = providerId,
-                logKey = "provider",
-                updated = _config.value.copy(providerRules = _config.value.providerRules - providerId),
-                successMessage = "Revoked provider policy",
-                failureMessage = "Failed to persist MCP provider policy revocation",
-                faultFor = { k, e -> McpPolicyFault.ProviderPolicyPersistFailed(k, e) },
-            )
+            val saved =
+                applyConfig(
+                    key = providerId,
+                    logKey = "provider",
+                    updated = _config.value.copy(providerRules = _config.value.providerRules - providerId),
+                    successMessage = "Revoked provider policy",
+                    failureMessage = "Failed to persist MCP provider policy revocation",
+                    faultFor = { k, e -> McpPolicyFault.ProviderPolicyPersistFailed(k, e) },
+                )
+            // Invalidate queued authorizations even when the durable reset fails.
+            providerRevocations[providerId] = (providerRevocations[providerId] ?: 0L) + 1
+            saved
         }
 
     /**
