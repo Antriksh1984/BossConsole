@@ -567,7 +567,9 @@ class TrackingPluginContext(
  * context used to) let any installed plugin call `createStorage("some-other-plugin-id")`
  * and read, overwrite, or `clear()` a different plugin's persisted data. Mirrors
  * DownloadCenterProviderImpl.forPlugin: identity is bound once at construction, from a
- * source the plugin does not control, rather than trusted from a per-call argument.
+ * manifest identity registered by the host, rather than a per-call argument. This
+ * scopes the supported API only: in-process plugins can still access JVM/filesystem
+ * facilities, so this wrapper is not a security sandbox.
  */
 private class ScopedPluginStorageFactory(
     private val ownPluginId: String,

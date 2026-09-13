@@ -140,7 +140,8 @@ class TrackingPluginContextStorageScopeTest {
         val tracker = PluginRegistrationTracker()
         val pluginA = TrackingPluginContext("plugin.a", delegate, tracker)
 
-        pluginA.pluginStorageFactory?.createStorage("plugin.b")
+        val storage = pluginA.pluginStorageFactory?.createStorage("plugin.b")
+        assertEquals("plugin.a", storage?.getPluginId())
 
         assertEquals(
             listOf("plugin.a"),
