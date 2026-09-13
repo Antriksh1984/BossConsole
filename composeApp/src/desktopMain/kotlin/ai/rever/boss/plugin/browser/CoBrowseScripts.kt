@@ -100,8 +100,7 @@ internal object CoBrowseScripts {
         when (this) {
             is JsonObject -> values.all { it.isStrictJson() }
             is JsonArray -> all { it.isStrictJson() }
-            is JsonPrimitive ->
-                isString || content in setOf("true", "false", "null") || jsonNumber.matches(content)
+            is JsonPrimitive -> isString || content in setOf("true", "false", "null") || jsonNumber.matches(content)
         }
 
     /** Reject non-object messages and unquoted expressions before re-encoding remote data. */
