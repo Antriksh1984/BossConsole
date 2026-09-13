@@ -196,7 +196,10 @@ class DownloadServiceBridgeTest {
             authenticated.openFile(PathRequest.newBuilder().setPath(alias).build())
             authenticated.revealInFolder(PathRequest.newBuilder().setPath(alias).build())
 
-            assertEquals(listOf("openFile:${tracked.canonicalPath}", "revealInFolder:${tracked.canonicalPath}"), provider.calls)
+            assertEquals(
+                listOf("openFile:${tracked.canonicalPath}", "revealInFolder:${tracked.canonicalPath}"),
+                provider.calls,
+            )
         }
 
     @Test
