@@ -17,7 +17,7 @@ import java.io.File
  * Kernel-side bridge for `DownloadService`.
  *
  * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
- * helper shape as [SecretServiceBridge] - see that class's KDoc for the full rationale.
+ * helper shape introduced for the Secret Service in PR #505.
  *
  * [openFile] and [revealInFolder] get a second, narrower guard on top: [FileSystemUtils.openFile]
  * (reached through [DownloadDataProvider.openFile]) shells out to the OS's own "open with default
@@ -25,8 +25,7 @@ import java.io.File
  * not check that the path has anything to do with a download. Before this bridge required a
  * caller identity at all, that was an unauthenticated, unconfined "launch this file" primitive:
  * for an executable, `start "" file.exe` and a double-click are the same action, and this is the
- * exact class of thing BossConsole#484's download warning exists to gate - reachable here with no
- * dialog, no confirmation, and (until the identity check above) no attribution at all. Confining
+ * path does not provide an executable-consent dialog. Confining
  * both calls to a path this provider's own [DownloadDataProvider.downloads] list currently
  * tracks - canonical-path compared, so a symlink or a `..` cannot walk outside it - turns "open
  * any file that exists" back into "open a file BOSS itself downloaded", which is the only thing
@@ -37,10 +36,13 @@ import java.io.File
 class DownloadServiceBridge(
     private val provider: DownloadDataProvider,
 ) : DownloadServiceGrpcKt.DownloadServiceCoroutineImplBase() {
-    override fun watchDownloads(request: Empty): Flow<DownloadListResponse> =
-        flow {
-            val caller = authenticatedCallerOrRefuse("watchDownloads")
-            val currentIdentity = ProcessIdentityInterceptor.CURRENT_IDENTITY.get()
+    override fun watchDownloads(request: Empty): Flow<DownloadListResponse> {
+        // Capture the gRPC context before returning the asynchronously collected flow.
+        val currentIdentity = ProcessIdentityInterceptor.CURRENT_IDENTITY.get()
+        return flow {
+            val caller =
+                currentIdentity?.invoke()
+                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
             provider.downloads.collect { downloads ->
                 // A stream must not retain access after its process token has been revoked.
                 if (currentIdentity?.invoke() != caller) {
@@ -80,6 +82,7 @@ class DownloadServiceBridge(
                 )
             }
         }
+    }
 
     override suspend fun pauseDownload(request: DownloadIdRequest): OperationResult {
         authenticatedCallerOrRefuse("pauseDownload")
@@ -125,17 +128,23 @@ class DownloadServiceBridge(
      * as a download's [ai.rever.boss.plugin.api.DownloadItemData.destinationPath] - canonicalized
      * on both sides so a symlink or a `..` segment cannot walk outside the tracked set. See the
      * class KDoc for why this exists on top of the caller-identity check above.
+     * The provider snapshot is sampled for UI delivery; a newly created download remains refused
+     * until that snapshot includes it. Callers should use paths observed from watchDownloads.
      */
     private fun trackedDownloadPathOrRefuse(
         rpc: String,
         caller: String,
         requestedPath: String,
     ): String {
-        val requestedCanonical = runCatching { File(requestedPath).canonicalFile }.getOrNull()
+        val requestedCanonical =
+            requestedPath.takeIf { it.isNotBlank() }?.let {
+                runCatching { File(it).canonicalFile }.getOrNull()
+            }
         val isTracked =
             requestedCanonical != null &&
                 provider.downloads.value.any { item ->
-                    runCatching { File(item.destinationPath).canonicalFile }.getOrNull() == requestedCanonical
+                    item.destinationPath.isNotBlank() &&
+                        runCatching { File(item.destinationPath).canonicalFile }.getOrNull() == requestedCanonical
                 }
         if (!isTracked) {
             logger.warn(
@@ -151,7 +160,7 @@ class DownloadServiceBridge(
     /**
      * The verified identity behind this call, or a thrown `PERMISSION_DENIED` when there is none.
      *
-     * Mirrors [SecretServiceBridge]'s own helper (BossConsole#53) - fails closed rather than let a
+     * Mirrors the helper introduced by PR #505 (BossConsole#53) - fails closed rather than let a
      * request with no credential fall through to [provider] with nothing to attribute it to.
      */
     private fun authenticatedCallerOrRefuse(rpc: String): String =

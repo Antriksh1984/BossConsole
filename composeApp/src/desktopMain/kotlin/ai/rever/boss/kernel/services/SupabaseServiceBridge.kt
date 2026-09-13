@@ -22,8 +22,8 @@ import io.grpc.StatusException
  * feature, it is the whole Postgrest surface.
  *
  * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
- * helper shape as [SecretServiceBridge] - see that class's KDoc for the full rationale. Unlike
- * that fix, this one does not narrow *what* an authenticated caller may do here (every legitimate
+ * helper shape introduced for the Secret Service in PR #505. This does not narrow *what* an
+ * authenticated caller may do here (every legitimate
  * in-process plugin already has the identical unrestricted access via `PluginContext
  * .supabaseDataProvider` - see `DefaultPlugin.kt:528` - so that is an existing, accepted design
  * decision this bridge is not the place to relitigate). What was missing was *whether the caller
@@ -121,7 +121,7 @@ class SupabaseServiceBridge(
     /**
      * The verified identity behind this call, or a thrown `PERMISSION_DENIED` when there is none.
      *
-     * Mirrors [SecretServiceBridge]'s own helper (BossConsole#53) - fails closed rather than let a
+     * Mirrors the helper introduced by PR #505 (BossConsole#53) - fails closed rather than let a
      * request with no credential fall through to [provider] with nothing to attribute it to.
      */
     private fun authenticatedCallerOrRefuse(rpc: String): String =

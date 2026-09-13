@@ -198,6 +198,20 @@ class DownloadServiceBridgeTest {
             assertEquals(listOf("openFile:${tracked.canonicalPath}", "revealInFolder:${tracked.canonicalPath}"), provider.calls)
         }
 
+    @Test
+    fun `blank destinations and requests cannot authorize the working directory`() =
+        runBlocking {
+            provider.setDownloads(listOf(trackedItem("empty", "")))
+            for (path in listOf("", ".")) {
+                val failure = assertFailsWith<StatusException> {
+                    authenticated.openFile(PathRequest.newBuilder().setPath(path).build())
+                }
+                assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+                assertEquals("This path is not a download tracked by this provider", failure.status.description)
+            }
+            assertTrue(provider.calls.isEmpty())
+        }
+
     // ---- Path confinement: openFile / revealInFolder ----
 
     @Test
