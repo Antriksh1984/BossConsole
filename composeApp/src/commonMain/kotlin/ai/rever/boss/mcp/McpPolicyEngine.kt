@@ -279,10 +279,7 @@ class McpPolicyEngine(
             ) {
                 return@synchronized false
             }
-            if (preserveDeny &&
-                (_config.value.providerRules[providerId] == McpPolicyAction.DENY ||
-                    (toolName != null && policyFor(toolName, providerId) == McpPolicyAction.DENY))
-            ) {
+            if (preserveDeny && isProviderOrToolDenied(providerId, toolName)) {
                 return@synchronized false
             }
             applyConfig(
@@ -294,6 +291,18 @@ class McpPolicyEngine(
                 faultFor = { k, e -> McpPolicyFault.ProviderPolicyPersistFailed(k, e) },
             )
         }
+
+    /**
+     * True when [providerId]'s own rule is DENY, or [toolName] (when this call has one in mind)
+     * has a more specific DENY of its own - either one is what [setProviderPolicy]'s
+     * `preserveDeny` guard exists to protect from being overwritten.
+     */
+    private fun isProviderOrToolDenied(
+        providerId: String,
+        toolName: String?,
+    ): Boolean =
+        _config.value.providerRules[providerId] == McpPolicyAction.DENY ||
+            (toolName != null && policyFor(toolName, providerId) == McpPolicyAction.DENY)
 
     /**
      * The operator-facing undo for [setProviderPolicy]: removes [providerId]'s rule entirely

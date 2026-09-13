@@ -93,7 +93,12 @@ class McpProviderRevocationTest {
             assertTrue(invocation.await().isError)
             assertFalse(ran)
             assertFalse("p" in engine.config.value.providerRules)
-            assertEquals(McpApprovalDisposition.POLICY_DENIED, ledger.recentOperations.value.first().approvalDisposition)
+            assertEquals(
+                McpApprovalDisposition.POLICY_DENIED,
+                ledger.recentOperations.value
+                    .first()
+                    .approvalDisposition,
+            )
         }
 
     @Test
