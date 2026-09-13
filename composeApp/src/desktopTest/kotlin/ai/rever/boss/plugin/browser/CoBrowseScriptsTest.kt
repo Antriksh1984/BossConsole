@@ -24,14 +24,54 @@ class CoBrowseScriptsTest {
             """(function(){return(0"""
 
     @Test
+    fun `unquoted JavaScript expressions are rejected at every nesting depth`() {
+        val payloads =
+            listOf(
+                """{"kind":alert(1)}""",
+                """{"kind":"click","id":(globalThis.injected=1)}""",
+                """{"kind":"input","value":{"nested":alert(1)}}""",
+                """{"kind":"input","value":[alert(1)]}""",
+            )
+        for (payload in payloads) {
+            assertEquals(
+                """(function(){ return "invalid"; })();""",
+                CoBrowseScripts.applyControl(payload),
+                payload,
+            )
+        }
+    }
+
+    @Test
+    fun `invalid JSON number tokens are rejected`() {
+        for (token in listOf("NaN", "Infinity", "undefined", "+1", "01", "0x10", "1.", ".1")) {
+            assertEquals(
+                """(function(){ return "invalid"; })();""",
+                CoBrowseScripts.applyControl("""{"id":$token}"""),
+                token,
+            )
+        }
+    }
+
+    @Test
+    fun `valid nested JSON primitives and exponent numbers remain supported`() {
+        val payload = """{"kind":"scroll","id":1,"x":-0.25e+2,"y":1E3,"data":[true,false,null,{"x":"alert(1)"}]}"""
+        assertTrue(CoBrowseScripts.applyControl(payload).endsWith("})($payload);"))
+    }
+
+    @Test
+    fun `Unicode line separators stay inside string data on modern Chromium`() {
+        val payload = "{\"kind\":\"input\",\"value\":\"before\u2028middle\u2029after\"}"
+        // executeJavaScript uses Chromium's ES2019+ JSON-superset string grammar.
+        assertTrue(CoBrowseScripts.applyControl(payload).endsWith("})($payload);"))
+    }
+
+    @Test
     fun `a payload that is not syntactically complete JSON cannot break out of the IIFE call`() {
         val script = CoBrowseScripts.applyControl(breakoutPayload)
 
         assertFalse(script.contains("evil.example"), "the raw payload must never reach the generated script")
         assertFalse(script.contains("fetch("), "no injected call may appear in the generated script")
-        // Exactly one call to the control-applier IIFE - the malicious "close early, add a
-        // second statement" shape would show up as more than one top-level `})(` sequence.
-        assertEquals(1, Regex("""\}\)\(""").findAll(script).count())
+        assertEquals("""(function(){ return "invalid"; })();""", script)
     }
 
     @Test
@@ -65,7 +105,7 @@ class CoBrowseScriptsTest {
         assertFalse(script.contains(""""invalid""""))
         assertTrue(script.contains(""""kind":"click""""))
         assertTrue(script.contains(""""id":42"""))
-        assertEquals(1, Regex("""\}\)\(""").findAll(script).count())
+        assertTrue(script.endsWith("""})({"kind":"click","id":42});"""))
     }
 
     @Test
@@ -87,9 +127,8 @@ class CoBrowseScriptsTest {
         // The security property is not "alert(1) is absent" - it legitimately appears as
         // inert text inside the quoted "value" field, which is correct and safe. What must
         // hold is that the embedded quote and backslash stayed inside that one JSON string
-        // (re-escaped, not raw) rather than terminating it early, and that the whole thing
-        // is still exactly one call into applyControl's IIFE - not two statements.
-        assertEquals(1, Regex("""\}\)\(""").findAll(script).count())
+        // (re-escaped, not raw) rather than terminating it early.
+        assertTrue(script.endsWith("})($payload);"))
         val embeddedValue =
             Regex(""""value":"((?:[^"\\]|\\.)*)"""").find(script)?.groupValues?.get(1)
                 ?: error("expected an escaped \"value\" field in: $script")

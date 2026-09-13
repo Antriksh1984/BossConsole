@@ -3,7 +3,10 @@ package ai.rever.boss.plugin.browser
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * JavaScript for the co-browse (DOM state-sync) tab-sharing feature.
@@ -89,22 +92,24 @@ internal object CoBrowseScripts {
     /** Set or clear the in-page control guard (defence-in-depth alongside the host gate). */
     fun setControlGuard(granted: Boolean): String = "window.__bossControlGranted = $granted;"
 
-    /**
-     * [payloadJsonLiteral] is spliced verbatim as JS source text into the IIFE call
-     * below - it is documented (`BrowserHandle.applyCoBrowseControl`) as coming from a
-     * controlling remote viewer, over a channel this repo does not define the wire
-     * format for. Trusting it as already-safe JSON would let a malformed value break
-     * out of the call - e.g. closing the argument list and appending further
-     * statements - and run arbitrary script in the shared page's real origin. Parsing
-     * it through a strict JSON parser and re-serializing the result is what actually
-     * closes that: a value that is not syntactically complete, valid JSON (nothing
-     * trailing a single top-level object) is rejected outright, and the text that
-     * does reach the page is this function's own canonical re-encoding, never the
-     * caller's raw string.
-     */
+    // JsonElement parsing accepts arbitrary unquoted primitive tokens, even with
+    // isLenient=false. Validate every leaf before emitting an object as JavaScript.
+    private val jsonNumber = Regex("""-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?""")
+
+    private fun JsonElement.isStrictJson(): Boolean =
+        when (this) {
+            is JsonObject -> values.all { it.isStrictJson() }
+            is JsonArray -> all { it.isStrictJson() }
+            is JsonPrimitive ->
+                isString || content in setOf("true", "false", "null") || jsonNumber.matches(content)
+        }
+
+    /** Reject non-object messages and unquoted expressions before re-encoding remote data. */
     private fun canonicalControlPayload(payloadJsonLiteral: String): String? =
         runCatching {
-            (Json.parseToJsonElement(payloadJsonLiteral) as? JsonObject)?.toString()
+            (Json.parseToJsonElement(payloadJsonLiteral) as? JsonObject)
+                ?.takeIf { it.isStrictJson() }
+                ?.toString()
         }.getOrNull()
 
     /**
