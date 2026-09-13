@@ -167,9 +167,10 @@ class DownloadServiceBridgeTest {
             withTimeout(10_000) {
                 supervisorScope {
                     val received = Channel<Unit>(Channel.UNLIMITED)
-                    val watching = async {
-                        authenticated.watchDownloads(Empty.getDefaultInstance()).collect { received.send(Unit) }
-                    }
+                    val watching =
+                        async {
+                            authenticated.watchDownloads(Empty.getDefaultInstance()).collect { received.send(Unit) }
+                        }
                     try {
                         received.receive()
                         tokenRegistry.revoke(CALLER)
@@ -203,9 +204,10 @@ class DownloadServiceBridgeTest {
         runBlocking {
             provider.setDownloads(listOf(trackedItem("empty", "")))
             for (path in listOf("", ".")) {
-                val failure = assertFailsWith<StatusException> {
-                    authenticated.openFile(PathRequest.newBuilder().setPath(path).build())
-                }
+                val failure =
+                    assertFailsWith<StatusException> {
+                        authenticated.openFile(PathRequest.newBuilder().setPath(path).build())
+                    }
                 assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
                 assertEquals("This path is not a download tracked by this provider", failure.status.description)
             }
