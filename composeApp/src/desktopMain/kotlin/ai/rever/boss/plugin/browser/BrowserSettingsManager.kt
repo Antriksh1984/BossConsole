@@ -35,9 +35,8 @@ object BrowserSettingsManager {
 
     /**
      * `internal var` so a test can point it at a temp file, matching
-     * `DefaultAppsSettingsManager`. There is no other seam: the path is resolved from
-     * `BossDirectories`, and a round-trip test that wrote to the real
-     * `~/.boss/browser-settings.json` would clobber the developer's own settings.
+     * `DefaultAppsSettingsManager`. desktopTest already isolates user.home; this seam
+     * additionally isolates round trips from other tests sharing that home and JVM.
      */
     internal var settingsFile = BossDirectories.resolve("browser-settings.json")
     private val json =

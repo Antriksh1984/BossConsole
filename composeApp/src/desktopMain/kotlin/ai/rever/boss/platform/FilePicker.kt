@@ -152,6 +152,7 @@ actual fun confirmExecutableDownload(fileName: String): Boolean =
         // behind it. Already on the EDT here (confirmExecutableDownloadOnEdt's own Runnable), so
         // this can call AWT directly rather than needing invokeLater the way a cross-thread caller
         // (WindowFocusManager.focusWindow) does.
+        if (!owner.isVisible) owner.isVisible = true
         owner.toFront()
         owner.requestFocus()
         JOptionPane.showOptionDialog(

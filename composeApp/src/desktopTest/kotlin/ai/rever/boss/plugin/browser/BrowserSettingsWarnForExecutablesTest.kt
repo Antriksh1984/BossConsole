@@ -64,11 +64,8 @@ class BrowserSettingsWarnForExecutablesTest {
 
     @BeforeEach
     fun pointAtTempFile() {
-        // Reading settingsFile first may trigger the manager's init, which loads the REAL
-        // ~/.boss/browser-settings.json. The snapshot must come after that read: a value
-        // captured at field-initialization time would hold the pre-load default (the same
-        // trap BrowserSettingsMirrorTest documents) and the restore would then clobber a
-        // developer's own settings.
+        // Initialize before snapshotting. desktopTest isolates user.home, while the temp
+        // file seam also isolates each round trip from the other tests in this JVM.
         originalFile = BrowserSettingsManager.settingsFile
         original = snapshot()
         BrowserSettingsManager.settingsFile = File(dir, "browser-settings.json")
@@ -95,9 +92,9 @@ class BrowserSettingsWarnForExecutablesTest {
 
     @Test
     fun `the persisted shape defaults to on`() {
-        // The declared in-memory default cannot be observed after init has loaded the real
-        // settings file, so this pins the shape's default - the half that decides what an
-        // upgrade whose file lacks the key loads as.
+        // desktopTest starts with an empty isolated home. The pre-mutation snapshot pins
+        // first launch without a file; the data default pins upgrades lacking this key.
+        assertTrue(original.warnForExecutables, "first launch must enable the warning")
         assertTrue(BrowserSettingsData().warnForExecutables)
     }
 

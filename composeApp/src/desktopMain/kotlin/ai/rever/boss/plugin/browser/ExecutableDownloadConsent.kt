@@ -16,7 +16,7 @@ internal fun executableDownloadAllowed(
     return !executable || confirm(savedFileName)
 }
 
-/** No terminal listeners exist yet, so release start-time bookkeeping before answering cancel. */
+/** No terminal listeners exist yet; keep URL suppression until cancellation has been answered. */
 internal fun cancelPendingDownload(
     savePath: String?,
     downloadId: String,
@@ -25,6 +25,9 @@ internal fun cancelPendingDownload(
     cancel: () -> Unit,
 ) {
     savePath?.let { FileSystemUtils.releaseFilePath(it, owner = downloadId) }
-    activeDownloadUrls.remove(downloadUrl)
-    cancel()
+    try {
+        cancel()
+    } finally {
+        activeDownloadUrls.remove(downloadUrl)
+    }
 }

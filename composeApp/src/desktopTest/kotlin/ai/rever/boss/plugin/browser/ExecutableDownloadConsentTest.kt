@@ -6,6 +6,7 @@ import java.io.File
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -80,7 +81,7 @@ class ExecutableDownloadConsentTest {
     }
 
     @Test
-    fun `declining releases the owned path and URL before cancelling exactly once`() {
+    fun `declining releases the path and keeps URL suppression until cancellation completes`() {
         val directory = Files.createTempDirectory("download-consent").toFile()
         val owner = "declined-download"
         val path = FileSystemUtils.generateUniqueFilePath(directory.path, "setup.exe", owner)
@@ -88,7 +89,7 @@ class ExecutableDownloadConsentTest {
         var cancels = 0
         try {
             cancelPendingDownload(path, owner, urls.single(), urls) {
-                assertTrue(urls.isEmpty())
+                assertEquals(setOf("https://example.test/setup.exe"), urls)
                 val next = FileSystemUtils.generateUniqueFilePath(directory.path, "setup.exe", "retry")
                 try {
                     assertEquals(path, next, "Cancel must leave the original filename available")
@@ -98,6 +99,7 @@ class ExecutableDownloadConsentTest {
                 cancels++
             }
             assertEquals(1, cancels)
+            assertTrue(urls.isEmpty())
             assertFalse(java.io.File(path).exists())
         } finally {
             FileSystemUtils.releaseFilePath(path, owner)
@@ -130,5 +132,17 @@ class ExecutableDownloadConsentTest {
         cancelPendingDownload(null, "dialog", "url", urls) { cancels++ }
         assertTrue(urls.isEmpty())
         assertEquals(1, cancels)
+    }
+
+    @Test
+    fun `a failed cancellation still releases URL tracking`() {
+        val urls = mutableSetOf("url")
+        assertFailsWith<IllegalStateException> {
+            cancelPendingDownload(null, "dialog", "url", urls) {
+                assertEquals(setOf("url"), urls)
+                error("browser disposed")
+            }
+        }
+        assertTrue(urls.isEmpty())
     }
 }
