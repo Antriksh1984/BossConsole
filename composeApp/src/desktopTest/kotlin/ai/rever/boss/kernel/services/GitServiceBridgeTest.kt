@@ -102,7 +102,13 @@ class GitServiceBridgeTest {
             assertRefused { anonymous.checkout(GitRefRequest.newBuilder().setRef("main").build()) }
             assertRefused { anonymous.getCurrentProjectPath(Empty.getDefaultInstance()) }
             assertRefused {
-                anonymous.openFile(GitOpenFileRequest.newBuilder().setFilePath("a.kt").setWindowId("w1").build())
+                anonymous.openFile(
+                    GitOpenFileRequest
+                        .newBuilder()
+                        .setFilePath("a.kt")
+                        .setWindowId("w1")
+                        .build(),
+                )
             }
 
             assertTrue(provider.calls.isEmpty(), "a refused call must never reach the repository provider")
@@ -115,10 +121,20 @@ class GitServiceBridgeTest {
             provider.setCommitLog(listOf(commit("abc123")))
             provider.projectPath = "/repo"
 
-            val status = authenticated.watchFileStatus(Empty.getDefaultInstance()).take(1).toList().single()
+            val status =
+                authenticated
+                    .watchFileStatus(Empty.getDefaultInstance())
+                    .take(1)
+                    .toList()
+                    .single()
             assertEquals("a.kt", status.filesList.single().path)
 
-            val log = authenticated.watchCommitLog(Empty.getDefaultInstance()).take(1).toList().single()
+            val log =
+                authenticated
+                    .watchCommitLog(Empty.getDefaultInstance())
+                    .take(1)
+                    .toList()
+                    .single()
             assertEquals("abc123", log.commitsList.single().hash)
 
             val path = authenticated.getCurrentProjectPath(Empty.getDefaultInstance())
