@@ -16,10 +16,14 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.Status
 import io.grpc.StatusException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -157,6 +161,43 @@ class DownloadServiceBridgeTest {
             )
         }
 
+    @Test
+    fun `revoked watcher cannot receive a later download snapshot`() =
+        runBlocking {
+            withTimeout(10_000) {
+                supervisorScope {
+                    val received = Channel<Unit>(Channel.UNLIMITED)
+                    val watching = async {
+                        authenticated.watchDownloads(Empty.getDefaultInstance()).collect { received.send(Unit) }
+                    }
+                    try {
+                        received.receive()
+                        tokenRegistry.revoke(CALLER)
+                        provider.setDownloads(listOf(trackedItem("private", "/private/new-download.txt")))
+                        val failure = assertFailsWith<StatusException> { watching.await() }
+                        assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+                        assertTrue(received.tryReceive().isFailure, "revocation must prevent the next snapshot")
+                    } finally {
+                        watching.cancel()
+                        received.close()
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `tracked aliases are passed to the provider as their validated canonical path`() =
+        runBlocking {
+            val tracked = tempTrackedFile()
+            val alias = java.io.File(tracked.parentFile, "./${tracked.name}").path
+            provider.setDownloads(listOf(trackedItem("d1", tracked.path)))
+
+            authenticated.openFile(PathRequest.newBuilder().setPath(alias).build())
+            authenticated.revealInFolder(PathRequest.newBuilder().setPath(alias).build())
+
+            assertEquals(listOf("openFile:${tracked.canonicalPath}", "revealInFolder:${tracked.canonicalPath}"), provider.calls)
+        }
+
     // ---- Path confinement: openFile / revealInFolder ----
 
     @Test
@@ -197,7 +238,7 @@ class DownloadServiceBridgeTest {
 
             authenticated.openFile(PathRequest.newBuilder().setPath(tracked.absolutePath).build())
 
-            assertEquals(listOf("openFile:${tracked.absolutePath}"), provider.calls)
+            assertEquals(listOf("openFile:${tracked.canonicalPath}"), provider.calls)
         }
 
     @Test

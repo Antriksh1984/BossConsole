@@ -39,8 +39,13 @@ class DownloadServiceBridge(
 ) : DownloadServiceGrpcKt.DownloadServiceCoroutineImplBase() {
     override fun watchDownloads(request: Empty): Flow<DownloadListResponse> =
         flow {
-            authenticatedCallerOrRefuse("watchDownloads")
+            val caller = authenticatedCallerOrRefuse("watchDownloads")
+            val currentIdentity = ProcessIdentityInterceptor.CURRENT_IDENTITY.get()
             provider.downloads.collect { downloads ->
+                // A stream must not retain access after its process token has been revoked.
+                if (currentIdentity?.invoke() != caller) {
+                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                }
                 emit(
                     DownloadListResponse
                         .newBuilder()
@@ -140,7 +145,7 @@ class DownloadServiceBridge(
             )
             throw StatusException(Status.PERMISSION_DENIED.withDescription(NOT_A_TRACKED_DOWNLOAD))
         }
-        return requestedPath
+        return checkNotNull(requestedCanonical).path
     }
 
     /**
