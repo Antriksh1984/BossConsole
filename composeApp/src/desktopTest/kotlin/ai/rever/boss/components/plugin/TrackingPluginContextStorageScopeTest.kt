@@ -33,10 +33,11 @@ class TrackingPluginContextStorageScopeTest {
     /** Records which id it was actually asked to create storage for. */
     private class FakeStorageFactory : PluginStorageFactory {
         val requestedIds = mutableListOf<String>()
+        private val stores = mutableMapOf<String, FakeStorageProvider>()
 
         override fun createStorage(pluginId: String): PluginStorageProvider {
             requestedIds += pluginId
-            return FakeStorageProvider(pluginId)
+            return stores.getOrPut(pluginId) { FakeStorageProvider(pluginId) }
         }
     }
 
@@ -163,6 +164,10 @@ class TrackingPluginContextStorageScopeTest {
         // The underlying factory was still only ever asked for plugin.a - never plugin.b.
         assertTrue("plugin.b" !in factory.requestedIds, "plugin A must not be able to name plugin B's storage")
         assertEquals(listOf("plugin.a"), factory.requestedIds)
+
+        // The write is visible through A's own context, and repeated factory requests share state.
+        val ownStorage = pluginA.pluginStorageFactory?.createStorage("plugin.a")
+        assertEquals("value", kotlinx.coroutines.runBlocking { ownStorage?.getString("stolen") })
 
         // Plugin B's own storage (via its own context) is untouched.
         val pluginBStorage = pluginB.pluginStorageFactory?.createStorage("plugin.b")
