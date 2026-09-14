@@ -32,6 +32,7 @@ import ai.rever.boss.components.plugin.PluginLoadGateHost
 import ai.rever.boss.components.plugin.PluginLoadRemedyAccess
 import ai.rever.boss.components.plugin.PluginStoreVersionBridge
 import ai.rever.boss.components.plugin.PluginUpdateBridge
+import ai.rever.boss.components.plugin.PluginUpdateBusyException
 import ai.rever.boss.components.plugin.openTopOfMindQuickSwitcher
 import ai.rever.boss.components.plugin.providers.GenericDialogHostContent
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
@@ -140,6 +141,14 @@ internal fun BossAppDialogs(state: BossAppState) {
                             cause is DependentRestartDeclinedException -> {
                                 StatusMessageManager.showMessage(
                                     "${prompt.displayName} was left on v${prompt.currentVersion}",
+                                )
+                            }
+
+                            // Another window is already running this same update - nothing was
+                            // downloaded, unloaded, or removed here, so this is not a failure.
+                            cause is PluginUpdateBusyException -> {
+                                StatusMessageManager.showMessage(
+                                    "${prompt.displayName} is already being updated in another window",
                                 )
                             }
 

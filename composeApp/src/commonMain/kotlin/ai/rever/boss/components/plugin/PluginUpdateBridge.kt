@@ -18,3 +18,14 @@ expect object PluginUpdateBridge {
         manager: DynamicPluginManager,
     ): Result<String>
 }
+
+/**
+ * Another [PluginUpdateBridge.performUpdate] call for [pluginId] is already in flight, process-
+ * wide - typically a second window confirming the same "Update Available" prompt before the
+ * first finishes (BossConsole#600). A distinct type so the caller can word this as "try again in
+ * a moment" rather than "Update failed": nothing was downloaded, unloaded, or removed, and the
+ * in-flight caller's own progress/cancel controls are untouched.
+ */
+class PluginUpdateBusyException(
+    val pluginId: String,
+) : Exception("An update for $pluginId is already in progress in another window")

@@ -3,6 +3,7 @@ package ai.rever.boss.components.plugin
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.downloads.DownloadCenter
 import ai.rever.boss.plugin.MissingDependencyReporter
+import ai.rever.boss.plugin.PerKeyAdmission
 import ai.rever.boss.plugin.PluginPersistence
 import ai.rever.boss.plugin.PluginStoreSetup
 import ai.rever.boss.plugin.api.PluginState
@@ -24,8 +25,23 @@ import java.io.File
  * in [PluginStoreSetup] (which is gated by host IPC compatibility, so `availableUpdates` only ever
  * contains versions the running BOSS can load) and to [DynamicPluginManager] for unload/load.
  */
+// performUpdateLocked's split from performUpdate (the BossConsole#600 admission gate) pushed the
+// object past the function-count threshold by one.
+@Suppress("TooManyFunctions")
 actual object PluginUpdateBridge {
     private val logger = BossLogger.forComponent("PluginUpdateBridge")
+
+    /**
+     * Admits at most one [performUpdate] per plugin id, process-wide (BossConsole#600).
+     *
+     * Two windows can both show an "Update Available" prompt for the same plugin and both
+     * confirm it before the first finishes. `DownloadCenter`'s progress row (what `ownsTransfer`
+     * governs) is presentation state, not admission - both callers would otherwise race on the
+     * SAME version-named jar (`downloadTargetIn`), so one operation's cleanup
+     * (`discardIfUnswapped`) can delete the artifact the other has already loaded or is mid-load
+     * of.
+     */
+    private val updateAdmission = PerKeyAdmission<String>()
 
     actual suspend fun refreshAll(installed: List<InstalledPluginRef>) {
         if (installed.isEmpty()) return
@@ -93,6 +109,26 @@ actual object PluginUpdateBridge {
     }
 
     actual suspend fun performUpdate(
+        pluginId: String,
+        manager: DynamicPluginManager,
+    ): Result<String> {
+        // Admission before anything else - prompts, the rollback snapshot, the download, and
+        // cleanup are all side effects a duplicate call must never reach (BossConsole#600).
+        if (!updateAdmission.tryAcquire(pluginId)) {
+            return Result.failure(PluginUpdateBusyException(pluginId))
+        }
+        return try {
+            performUpdateLocked(pluginId, manager)
+        } finally {
+            // A plain set removal, not a suspending call, so this runs on every exit - success,
+            // failure, exception, or cancellation - and a retry is never left permanently locked
+            // out by a caller that cancelled mid-update.
+            updateAdmission.release(pluginId)
+        }
+    }
+
+    @Suppress("ReturnCount") // Several independent early-failure branches predate this split.
+    private suspend fun performUpdateLocked(
         pluginId: String,
         manager: DynamicPluginManager,
     ): Result<String> {
