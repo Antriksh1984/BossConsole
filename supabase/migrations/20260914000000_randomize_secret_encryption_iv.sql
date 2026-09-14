@@ -63,7 +63,7 @@ BEGIN
     -- split back off the front of the stored envelope.
     iv := extensions.gen_random_bytes(16);
     ciphertext := extensions.encrypt_iv(
-        plaintext::bytea,
+        pg_catalog.convert_to(plaintext, 'utf8'),
         encryption_key::bytea,
         iv,
         'aes'::text
