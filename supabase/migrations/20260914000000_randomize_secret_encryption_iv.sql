@@ -91,9 +91,14 @@ BEGIN
     encryption_key := public.get_encryption_key();
 
     IF ciphertext LIKE 'v2:%' THEN
-        envelope := pg_catalog.decode(pg_catalog.substring(ciphertext from 4), 'base64'::text);
-        iv := pg_catalog.substring(envelope from 1 for 16);
-        body := pg_catalog.substring(envelope from 17);
+        -- substring(x FROM y [FOR z]) is SQL-standard trailing syntax the parser recognizes only
+        -- on the bare function name - schema-qualifying it (pg_catalog.substring(...)) makes FROM
+        -- a syntax error, since it is then parsed as an ordinary call instead. search_path above
+        -- already resolves the unqualified name to this one function (20260909000000_encrypt_totp.sql
+        -- decrypt_text does the same).
+        envelope := pg_catalog.decode(substring(ciphertext from 4), 'base64'::text);
+        iv := substring(envelope from 1 for 16);
+        body := substring(envelope from 17);
         RETURN pg_catalog.convert_from(
             extensions.decrypt_iv(body, encryption_key::bytea, iv, 'aes'::text),
             'utf8'::name
@@ -141,8 +146,8 @@ WHERE recovery_codes_encrypted IS NOT NULL
 ALTER TABLE public.secret_metadata DISABLE TRIGGER encrypt_twofa_secret_trigger;
 
 UPDATE public.secret_metadata
-SET twofa_secret = 'v1:' || public.encrypt_text(public.decrypt_text(pg_catalog.substring(twofa_secret from 4)))
+SET twofa_secret = 'v1:' || public.encrypt_text(public.decrypt_text(substring(twofa_secret from 4)))
 WHERE twofa_secret LIKE 'v1:%'
-  AND pg_catalog.substring(twofa_secret from 4) NOT LIKE 'v2:%';
+  AND substring(twofa_secret from 4) NOT LIKE 'v2:%';
 
 ALTER TABLE public.secret_metadata ENABLE TRIGGER encrypt_twofa_secret_trigger;
