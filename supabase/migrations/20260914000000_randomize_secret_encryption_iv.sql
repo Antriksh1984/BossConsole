@@ -46,7 +46,12 @@
 -- been updated in the same change as this migration to re-encrypt either
 -- shape under its own envelope (a v2 row gets a fresh IV; a legacy row, such
 -- as the still-unmigrated qbo_token_state/google_token_state columns, stays
--- zero-IV). See that script's own comment for the detail.
+-- zero-IV). Existing broker rows are NOT upgraded by this migration or by
+-- rotation; only later application writes change their format. Their schemas
+-- are operated outside this repository and need an explicit operator-owned
+-- backfill. This change is scoped to the three user-secret fields in #618.
+-- The inner v2 encryption version is independent of TOTP's outer v1 marker.
+-- See that script's own comment for the detail.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION "public"."encrypt_text"("plaintext" "text") RETURNS "text"
@@ -93,9 +98,9 @@ BEGIN
     IF ciphertext LIKE 'v2:%' THEN
         -- substring(x FROM y [FOR z]) is SQL-standard trailing syntax the parser recognizes only
         -- on the bare function name - schema-qualifying it (pg_catalog.substring(...)) makes FROM
-        -- a syntax error, since it is then parsed as an ordinary call instead. search_path above
-        -- already resolves the unqualified name to this one function (20260909000000_encrypt_totp.sql
-        -- decrypt_text does the same).
+        -- a syntax error, since it is then parsed as an ordinary call instead. The parser
+        -- resolves this SQL-standard form to pg_catalog.substring; it does not rely
+        -- on search_path (20260909000000_encrypt_totp.sql does the same).
         envelope := pg_catalog.decode(substring(ciphertext from 4), 'base64'::text);
         iv := substring(envelope from 1 for 16);
         body := substring(envelope from 17);
@@ -125,6 +130,46 @@ ALTER FUNCTION "public"."decrypt_text"("ciphertext" "text") OWNER TO "postgres";
 -- migration (or a row already migrated by a prior partial run) is a no-op,
 -- matching 20260909000000_encrypt_totp.sql's own idempotency contract.
 
+-- Keep the trigger-disabled window atomic even under psql without -1.
+DO $backfill$
+DECLARE
+    field record;
+    stored record;
+    unreadable bigint;
+BEGIN
+    -- A missing/disabled input trigger is an unsafe schema state, not an optional
+    -- deployment. Refuse before touching data; the operator must restore it first.
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+        WHERE tgrelid = 'public.secret_metadata'::regclass
+          AND tgname = 'encrypt_twofa_secret_trigger' AND tgenabled = 'O') THEN
+        RAISE EXCEPTION 'IV upgrade requires enabled encrypt_twofa_secret_trigger; restore the TOTP input trigger first';
+    END IF;
+
+    -- Report counts and column names only, never plaintext, ciphertext or keys.
+    -- Do not skip unreadable rows or turn them into NULL during an upgrade.
+    FOR field IN SELECT * FROM (VALUES
+        ('secrets', 'password_encrypted', 1, ''),
+        ('secret_metadata', 'recovery_codes_encrypted', 1, ''),
+        ('secret_metadata', 'twofa_secret', 4, 'v1:')
+    ) AS fields(tbl, col, start_at, prefix) LOOP
+        unreadable := 0;
+        FOR stored IN EXECUTE pg_catalog.format(
+            'SELECT pg_catalog.substr(%1$I, %2$s) AS value FROM public.%3$I '
+            'WHERE %1$I IS NOT NULL AND %1$I LIKE %4$L '
+            'AND pg_catalog.substr(%1$I, %2$s) NOT LIKE ''v2:%%''',
+            field.col, field.start_at, field.tbl, field.prefix || '%') LOOP
+            BEGIN
+                PERFORM public.decrypt_text(stored.value);
+            EXCEPTION WHEN OTHERS THEN
+                unreadable := unreadable + 1;
+            END;
+        END LOOP;
+        IF unreadable > 0 THEN
+            RAISE EXCEPTION 'IV upgrade refused: % unreadable rows in public.%; recover these rows with the correct key before retrying',
+                unreadable, field.tbl || '.' || field.col;
+        END IF;
+    END LOOP;
+
 UPDATE public.secrets
 SET password_encrypted = public.encrypt_text(public.decrypt_text(password_encrypted))
 WHERE password_encrypted IS NOT NULL
@@ -151,3 +196,5 @@ WHERE twofa_secret LIKE 'v1:%'
   AND substring(twofa_secret from 4) NOT LIKE 'v2:%';
 
 ALTER TABLE public.secret_metadata ENABLE TRIGGER encrypt_twofa_secret_trigger;
+END;
+$backfill$;

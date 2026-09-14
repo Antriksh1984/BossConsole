@@ -108,7 +108,7 @@ select is((select password from public.get_user_secrets(50,0) where website='rot
 -- the contract. Both negative cases raise before anything is mutated, so they
 -- leave the retained-key counts asserted above untouched.
 alter table public.secret_metadata disable trigger encrypt_twofa_secret_trigger;
-update public.secret_metadata sm set twofa_secret = 'v2:' || substr(sm.twofa_secret, 4)
+update public.secret_metadata sm set twofa_secret = 'v9:' || substr(sm.twofa_secret, 4)
   from public.secrets sec where sec.id = sm.secret_id and sec.website = 'rotation.example';
 select throws_ok($rot$
 \ir ../ops/rotate_master_encryption_key.sql

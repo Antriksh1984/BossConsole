@@ -7,7 +7,17 @@
 -- that it ran once at migration time.
 BEGIN;
 SELECT no_plan();
-SELECT vault.create_secret('iv-test-key-0123456789abcdef01234567', 'master_encryption_key', 'pgTAP only');
+DO $fixture$
+DECLARE existing uuid;
+BEGIN
+    SELECT id INTO existing FROM vault.secrets WHERE name = 'master_encryption_key';
+    IF existing IS NULL THEN
+        PERFORM vault.create_secret('iv-test-key-0123456789abcdef01234567', 'master_encryption_key', 'pgTAP only');
+    ELSE
+        PERFORM vault.update_secret(existing, 'iv-test-key-0123456789abcdef01234567', 'master_encryption_key', 'pgTAP only');
+    END IF;
+END;
+$fixture$;
 
 -- ---- Determinism is broken: two encryptions of the same plaintext differ.
 SELECT isnt(
