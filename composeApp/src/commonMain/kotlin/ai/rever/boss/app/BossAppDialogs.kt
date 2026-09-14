@@ -811,12 +811,9 @@ internal fun BossAppDialogs(state: BossAppState) {
     // carries no evidence of who made it — the operator says whether it runs,
     // and sees the exact text first.
     state.terminalCommandApprovals.current?.let { pending ->
-        ConfirmationDialog(
-            title = "Run this command?",
-            message =
-                "BOSS was asked from outside the app to run a command in a new terminal tab. " +
-                    "It has not run. Confirm only if you recognise it:\n\n${pending.command}",
-            confirmText = "Run command",
+        TerminalCommandApprovalDialog(
+            request = pending,
+            pendingCount = state.terminalCommandApprovals.size,
             onDismiss = { state.terminalCommandApprovals.consume(pending) },
             onConfirm = confirm@{
                 // Consume before execution; the dialog also calls onDismiss after onConfirm.

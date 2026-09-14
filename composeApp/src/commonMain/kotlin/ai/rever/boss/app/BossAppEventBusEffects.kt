@@ -150,7 +150,14 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                         "Holding an externally requested terminal command for confirmation",
                         mapOf("windowId" to windowId),
                     )
-                    state.terminalCommandApprovals.enqueue(PendingTerminalCommand(command, event.workingDirectory))
+                    val request = PendingTerminalCommand(command, event.workingDirectory)
+                    if (!state.terminalCommandApprovals.enqueue(request)) {
+                        logger.warn(
+                            LogCategory.TERMINAL,
+                            "External terminal command refused: approval queue full",
+                            mapOf("windowId" to windowId),
+                        )
+                    }
                 } else {
                     splitViewState.openTerminalInActivePanel(command, event.workingDirectory)
                     DashboardStatsManager.recordTerminalSession()

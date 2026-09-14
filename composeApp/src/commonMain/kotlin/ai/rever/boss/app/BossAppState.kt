@@ -269,7 +269,7 @@ internal class BossAppState(
  * invocation (see `DeepLinkOrigin`). The command is carried verbatim so the
  * prompt shows exactly what would run.
  */
-internal data class PendingTerminalCommand(
+internal class PendingTerminalCommand(
     val command: String,
     val workingDirectory: String?,
 )
