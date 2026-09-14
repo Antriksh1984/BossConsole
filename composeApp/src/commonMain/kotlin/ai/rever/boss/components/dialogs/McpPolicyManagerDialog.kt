@@ -1,6 +1,9 @@
 package ai.rever.boss.components.dialogs
 
 import ai.rever.boss.mcp.McpPolicyAction
+import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
+import ai.rever.boss.plugin.api.McpToolArgs
+import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -42,6 +46,21 @@ import kotlinx.coroutines.launch
  * revocation path this repo's own AGENTS.md names as reachable only by hand-editing
  * `~/.boss/mcp-tool-policy.json` and restarting, until this dialog existed.
  *
+ * It also lets an operator set a rule *proactively*, for a tool nothing has ever asked about yet.
+ * Before this, the only way a persistent rule came to exist was reactive: a plugin had to actually
+ * invoke the tool and trigger the approval dialog, and only then could "Always Allow"/"Always
+ * Deny" be clicked. An operator who already knows they never want a given tool run - `k8s_delete`,
+ * say - had no way to say so ahead of time; they could only wait to be asked, or hand-edit the
+ * policy file this dialog exists to make unnecessary. [availableTools] is every registered tool
+ * that does not already have a rule in [rules], and [onSetPolicy] writes one through
+ * [ai.rever.boss.mcp.McpPolicyEngine.setToolPolicyIfAbsent] - a dedicated add-only-if-absent
+ * write, not the reactive approval path's own [ai.rever.boss.mcp.McpPolicyEngine.setToolPolicy].
+ * The two calls answer different questions: the reactive path replaces whatever rule a tool has
+ * when an operator explicitly clicks "Always Allow"/"Always Deny" *for that tool*, while this
+ * path must never replace a rule that already exists, however it got there - including one an
+ * explicit reactive decision wrote in the gap between this row being offered as a candidate and
+ * the operator's click here reaching disk (review on #636).
+ *
  * [rules] is a snapshot the caller re-derives from [ai.rever.boss.mcp.McpPolicyEngine.config] on
  * every recomposition, not a copy this dialog owns - a revoke calls back into [onRevoke] and
  * waits for the same state flow to reflect it, rather than mutating a local list that could drift
@@ -51,7 +70,9 @@ import kotlinx.coroutines.launch
 @Suppress("LongMethod") // Declarative Compose layout.
 fun McpPolicyManagerDialog(
     rules: Map<String, McpPolicyAction>,
+    availableTools: List<McpToolIdentity>,
     onRevoke: suspend (toolName: String) -> Boolean,
+    onSetPolicy: suspend (tool: McpToolIdentity, action: McpPolicyAction) -> Boolean,
     onDismiss: () -> Unit,
 ) {
     val colors = BossTheme.colors
@@ -96,20 +117,24 @@ fun McpPolicyManagerDialog(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
 
-                if (rules.isEmpty()) {
-                    Text(
-                        text = "No saved rules. Default policies and session trust still apply.",
-                        fontSize = 13.sp,
-                        color = colors.textSecondary,
-                    )
-                } else {
-                    Column(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 320.dp)
-                                .verticalScroll(rememberScrollState()),
-                    ) {
+                // One scroll region for both sections, bounded so the Close button below it is
+                // never pushed off-window - two independently-scrolling sections plus fixed
+                // header/footer content could together exceed a short window's height with no way
+                // to reach Close (review on #636).
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 440.dp)
+                            .verticalScroll(rememberScrollState()),
+                ) {
+                    if (rules.isEmpty()) {
+                        Text(
+                            text = "No saved rules. Default policies and session trust still apply.",
+                            fontSize = 13.sp,
+                            color = colors.textSecondary,
+                        )
+                    } else {
                         rules.toSortedMap().forEach { (toolName, action) ->
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -126,7 +151,11 @@ fun McpPolicyManagerDialog(
                                         text = action.name,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Medium,
-                                        color = if (action == McpPolicyAction.DENY) colors.alert else colors.signal,
+                                        // Both values represent a durable, disk-persisted rule -
+                                        // the same category McpApprovalDialog's "Always Allow"/
+                                        // "Always Deny" buttons are, which use warn/alert rather
+                                        // than an ordinary success color.
+                                        color = if (action == McpPolicyAction.DENY) colors.alert else colors.warn,
                                     )
                                     if (failedRevoke == toolName) {
                                         Text(
@@ -168,6 +197,25 @@ fun McpPolicyManagerDialog(
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Text(
+                        text = "Set a rule proactively",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text =
+                            "For a tool nothing has asked about yet - no need to wait for an approval " +
+                                "prompt to lock one down. A tool name, not a specific plugin: another " +
+                                "plugin that later registers the same name inherits this rule too.",
+                        fontSize = 11.sp,
+                        color = colors.textSecondary,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    ProactivePolicySectionContent(availableTools, onSetPolicy, colors)
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -182,4 +230,149 @@ fun McpPolicyManagerDialog(
             }
         }
     }
+}
+
+/**
+ * A tool the policy engine can name a rule for - just enough identity for this dialog.
+ *
+ * [expectedRevocation] is [ai.rever.boss.mcp.McpPolicyEngine.revocationVersion] for
+ * ([toolName], [providerId]) captured when this tool was offered as a proactive candidate - the
+ * same generation-token pattern the reactive approval path uses (`McpToolRegistryImpl`'s own
+ * `revocation` captured at invocation time), so a DENY or reset landing at either scope between
+ * "this row was offered" and the write actually happening is caught by
+ * [ai.rever.boss.mcp.McpPolicyEngine.setToolPolicyIfAbsent]'s own lock-protected recheck rather
+ * than silently overwritten. That recheck also refuses outright if [toolName] has picked up *any*
+ * rule since - not only a DENY, and not only through a revoke: an explicit ASK or ALLOW made
+ * through the reactive approval dialog in the meantime never touches [expectedRevocation], so the
+ * add-only-if-absent check is what actually protects it (review on #636).
+ */
+data class McpToolIdentity(
+    val toolName: String,
+    val providerId: String,
+    val expectedRevocation: Long,
+)
+
+/**
+ * [availableTools] is already filtered and sorted by the caller
+ * ([ai.rever.boss.components.bars.horizontal.mcpProactivePolicyCandidates]); this renders it with
+ * no scroll or height bound of its own so it shares the one outer scroll region
+ * [McpPolicyManagerDialog] wraps both sections in.
+ */
+@Composable
+private fun ProactivePolicySectionContent(
+    availableTools: List<McpToolIdentity>,
+    onSetPolicy: suspend (tool: McpToolIdentity, action: McpPolicyAction) -> Boolean,
+    colors: BossColorScheme,
+) {
+    val scope = rememberCoroutineScope()
+    var failedSet by remember { mutableStateOf<String?>(null) }
+    // Allow raises standing privilege strictly further than anything else in this dialog can -
+    // ASK-forever into unattended ALLOW for every future agent and argument set - so it gets the
+    // same second-tap confirmation removing a DENY gets above, plus the risk/scope context
+    // McpApprovalDialog shows before its own "Always Allow" (review on #636). Deny only ever
+    // narrows what a tool can do, so it fires on the first tap like Reset does above.
+    var confirmingAllow by remember { mutableStateOf<String?>(null) }
+
+    if (availableTools.isEmpty()) {
+        Text(
+            text = "Every registered tool already has a rule, or is disabled.",
+            fontSize = 12.sp,
+            color = colors.textSecondary,
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        availableTools.forEach { tool ->
+            ProactivePolicyRow(
+                tool = tool,
+                confirming = confirmingAllow == tool.toolName,
+                failed = failedSet == tool.toolName,
+                onArmAllow = { confirmingAllow = tool.toolName },
+                onSet = { action ->
+                    confirmingAllow = null
+                    scope.launch {
+                        failedSet = if (onSetPolicy(tool, action)) null else tool.toolName
+                    }
+                },
+                colors = colors,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProactivePolicyRow(
+    tool: McpToolIdentity,
+    confirming: Boolean,
+    failed: Boolean,
+    onArmAllow: () -> Unit,
+    onSet: (McpPolicyAction) -> Unit,
+    colors: BossColorScheme,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = tool.toolName,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = colors.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = tool.providerId,
+                    fontSize = 10.sp,
+                    color = colors.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (failed) {
+                    Text(
+                        text = "This tool already has a rule, or the write failed. See the host log.",
+                        fontSize = 10.sp,
+                        color = colors.alert,
+                    )
+                }
+            }
+
+            if (confirming) {
+                TextButton(onClick = { onSet(McpPolicyAction.ALLOW) }) {
+                    Text("Confirm allow?", fontSize = 11.sp, color = colors.warn)
+                }
+            } else {
+                TextButton(onClick = onArmAllow) {
+                    Text("Allow", fontSize = 11.sp, color = colors.warn)
+                }
+            }
+            TextButton(onClick = { onSet(McpPolicyAction.DENY) }) {
+                Text("Deny", fontSize = 11.sp, color = colors.alert)
+            }
+        }
+        if (confirming) {
+            ProactiveAllowConfirmation(tool.toolName, colors)
+        }
+    }
+}
+
+/** The risk/scope context shown once Allow is armed, before the confirming second tap. */
+@Composable
+private fun ProactiveAllowConfirmation(
+    toolName: String,
+    colors: BossColorScheme,
+) {
+    val risk = remember(toolName) { DefaultMcpRiskEvaluator().evaluateRisk(toolName, McpToolArgs(emptyMap())) }
+    Text(
+        text = "${risk.level}: ${risk.reason}",
+        fontSize = 10.sp,
+        color = colors.alert,
+    )
+    Text(
+        text =
+            "Applies to this tool name for all agents and arguments, across restarts " +
+                "and replacement plugins, until reset above.",
+        fontSize = 10.sp,
+        color = colors.textSecondary,
+    )
 }
