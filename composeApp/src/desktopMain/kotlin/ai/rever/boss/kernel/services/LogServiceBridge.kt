@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
 /**
+ * Revocation is checked before each emission; idle streams are not proactively disconnected.
+ *
  * Kernel-side bridge for `LogService`.
  *
  * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
@@ -35,10 +37,10 @@ class LogServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchLogs")
             provider.logs.collect { logs ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchLogs")
                 }
                 emit(
                     LogListResponse
@@ -67,10 +69,10 @@ class LogServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchFilter")
             provider.filter.collect { filter ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchFilter")
                 }
                 emit(
                     LogFilterProto
@@ -92,10 +94,10 @@ class LogServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchSearchQuery")
             provider.searchQuery.collect { query ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchSearchQuery")
                 }
                 emit(LogStringResponse.newBuilder().setValue(query).build())
             }
@@ -107,10 +109,10 @@ class LogServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchAutoScroll")
             provider.autoScroll.collect { enabled ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchAutoScroll")
                 }
                 emit(LogBoolResponse.newBuilder().setValue(enabled).build())
             }
@@ -154,20 +156,22 @@ class LogServiceBridge(
     }
 
     /**
-     * The verified identity behind this call, or a thrown `PERMISSION_DENIED` when there is none.
+     * Unary RPCs only: the verified identity, or a thrown `PERMISSION_DENIED` when there is none.
      *
      * Mirrors the helper introduced by PR #505 (BossConsole#53) - fails closed rather than let a
      * request with no credential fall through to [provider] with nothing to attribute it to.
      */
     private fun authenticatedCallerOrRefuse(rpc: String): String =
-        ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID.get() ?: run {
-            logger.warn(
-                LogCategory.AUTH,
-                "Refused $rpc: no verified process identity on this call",
-                mapOf("rpc" to rpc),
-            )
-            throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
-        }
+        ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID.get() ?: refuseIdentity(rpc)
+
+    private fun refuseIdentity(rpc: String): Nothing {
+        logger.warn(
+            LogCategory.AUTH,
+            "Refused $rpc: no current verified process identity on this call",
+            mapOf("rpc" to rpc),
+        )
+        throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+    }
 
     private companion object {
         val logger = BossLogger.forComponent("LogServiceBridge")

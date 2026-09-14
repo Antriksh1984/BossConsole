@@ -17,11 +17,15 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.Status
 import io.grpc.StatusException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -114,6 +118,39 @@ class LogServiceBridgeTest {
             authenticated.clearLogs(Empty.getDefaultInstance())
 
             assertEquals(listOf("exportLogs", "setSearchQuery", "clearLogs"), provider.calls)
+        }
+
+    @Test
+    fun `revoked caller cannot invoke a unary RPC`() =
+        runBlocking {
+            tokenRegistry.revoke(CALLER)
+            assertRefused { authenticated.exportLogs(Empty.getDefaultInstance()) }
+            assertTrue(provider.calls.isEmpty())
+        }
+
+    @Test
+    fun `revoked watcher cannot receive a later snapshot`() =
+        runBlocking {
+            withTimeout(10_000) {
+                supervisorScope {
+                    val received = Channel<Unit>(Channel.UNLIMITED)
+                    val watching =
+                        async {
+                            authenticated.watchLogs(Empty.getDefaultInstance()).collect { received.send(Unit) }
+                        }
+                    try {
+                        received.receive()
+                        tokenRegistry.revoke(CALLER)
+                        provider.setLogs(listOf(LogEntryData(1L, "after", LogSourceData.STDOUT)))
+                        val failure = assertFailsWith<StatusException> { watching.await() }
+                        assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+                        assertTrue(received.tryReceive().isFailure, "revocation must prevent the next snapshot")
+                    } finally {
+                        watching.cancel()
+                        received.close()
+                    }
+                }
+            }
         }
 
     private suspend fun assertRefused(call: suspend () -> Unit) {
