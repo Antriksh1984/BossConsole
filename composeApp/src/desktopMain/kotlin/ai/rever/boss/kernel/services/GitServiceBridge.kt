@@ -16,7 +16,8 @@ import kotlinx.coroutines.flow.flow
  * Kernel-side bridge for `GitService`.
  *
  * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
- * helper shape introduced for the Secret Service in PR #505. Before this, any process able to
+ * helper shape introduced for the Secret Service in PR #505. Stream revocation is checked
+ * before each emission; an idle revoked stream is not proactively disconnected. Before this, any process able to
  * open a connection to the kernel IPC server - not only the plugins the host itself loaded -
  * could read the open project's full commit history and working-tree status, and could
  * [discardChanges] (destroying uncommitted work), [checkout], [cherryPick] or [revert] against
@@ -32,10 +33,10 @@ class GitServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchFileStatus")
             provider.fileStatus.collect { statuses ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchFileStatus")
                 }
                 emit(
                     GitFileStatusListResponse
@@ -62,10 +63,10 @@ class GitServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchCommitLog")
             provider.commitLog.collect { commits ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchCommitLog")
                 }
                 emit(
                     GitCommitLogResponse
@@ -94,10 +95,10 @@ class GitServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchIsGitRepo")
             provider.isGitRepository.collect { isRepo ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchIsGitRepo")
                 }
                 emit(BoolResponse.newBuilder().setValue(isRepo).build())
             }
@@ -109,10 +110,10 @@ class GitServiceBridge(
         return flow {
             val caller =
                 currentIdentity?.invoke()
-                    ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    ?: refuseIdentity("watchIsLoading")
             provider.isLoading.collect { loading ->
                 if (currentIdentity.invoke() != caller) {
-                    throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+                    refuseIdentity("watchIsLoading")
                 }
                 emit(BoolResponse.newBuilder().setValue(loading).build())
             }
@@ -186,20 +187,23 @@ class GitServiceBridge(
     }
 
     /**
-     * The verified identity behind this call, or a thrown `PERMISSION_DENIED` when there is none.
+     * Unary RPCs only: the verified per-call identity, or `PERMISSION_DENIED`.
+     * Streams must capture CURRENT_IDENTITY synchronously and recheck it before each emission.
      *
      * Mirrors the helper introduced by PR #505 (BossConsole#53) - fails closed rather than let a
      * request with no credential fall through to [provider] with nothing to attribute it to.
      */
     private fun authenticatedCallerOrRefuse(rpc: String): String =
-        ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID.get() ?: run {
-            logger.warn(
-                LogCategory.AUTH,
-                "Refused $rpc: no verified process identity on this call",
-                mapOf("rpc" to rpc),
-            )
-            throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
-        }
+        ProcessIdentityInterceptor.AUTHENTICATED_PROCESS_ID.get() ?: refuseIdentity(rpc)
+
+    private fun refuseIdentity(rpc: String): Nothing {
+        logger.warn(
+            LogCategory.AUTH,
+            "Refused $rpc: no current verified process identity on this call",
+            mapOf("rpc" to rpc),
+        )
+        throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
+    }
 
     private fun GitOperationResultData.toProto(): GitOperationResultProto =
         when (this) {

@@ -20,11 +20,15 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.Status
 import io.grpc.StatusException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -151,6 +155,40 @@ class GitServiceBridgeTest {
             assertEquals(listOf("stage:a.kt", "checkout:main", "discardChanges:a.kt"), provider.calls)
         }
 
+    @Test
+    fun `revoked credentials cannot invoke a unary operation`() =
+        runBlocking {
+            tokenRegistry.revoke(CALLER)
+            val failure = assertFailsWith<StatusException> { authenticated.stageAll(Empty.getDefaultInstance()) }
+            assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+            assertTrue(provider.calls.isEmpty())
+        }
+
+    @Test
+    fun `revoked watcher cannot receive a later snapshot`() =
+        runBlocking {
+            withTimeout(10_000) {
+                supervisorScope {
+                    val received = Channel<Unit>(Channel.UNLIMITED)
+                    val watching =
+                        async {
+                            authenticated.watchFileStatus(Empty.getDefaultInstance()).collect { received.send(Unit) }
+                        }
+                    try {
+                        received.receive()
+                        tokenRegistry.revoke(CALLER)
+                        provider.setFileStatus(listOf(fileStatus("after-revocation.kt")))
+                        val failure = assertFailsWith<StatusException> { watching.await() }
+                        assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
+                        assertTrue(received.tryReceive().isFailure, "revocation must prevent the next snapshot")
+                    } finally {
+                        watching.cancel()
+                        received.close()
+                    }
+                }
+            }
+        }
+
     private suspend fun assertRefused(call: suspend () -> Unit) {
         val failure = assertFailsWith<StatusException> { call() }
         assertEquals(Status.Code.PERMISSION_DENIED, failure.status.code)
@@ -245,7 +283,10 @@ class GitServiceBridgeTest {
             return GitOperationResultData.Success(null)
         }
 
-        override fun getCurrentProjectPath(): String? = projectPath
+        override fun getCurrentProjectPath(): String? {
+            calls += "getCurrentProjectPath"
+            return projectPath
+        }
 
         override fun openFile(
             filePath: String,
