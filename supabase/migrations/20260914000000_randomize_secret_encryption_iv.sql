@@ -39,14 +39,14 @@
 --     later UTF8 decode error, never as an authentication failure). Adding one
 --     is a wire-format decision (where the tag lives, what key derives it)
 --     that deserves its own review, not a rider on this fix.
---   - ops/rotate_master_encryption_key.sql's re-encrypt loop operates on raw
---     ciphertext bytes directly (old key -> new key) and assumes the fixed,
---     no-IV, no-prefix legacy layout for every mapped column. After the
---     backfill below, every mapped column is 'v2:'-framed, and that script
---     needs a matching update - covered by extracting the IV before
---     re-encrypting and re-attaching a fresh one - before it is next run. It
---     is a manual runbook, not a migration, so it is not applied automatically
---     and rotation must not be run against this schema until it is updated.
+-- ops/rotate_master_encryption_key.sql's re-encrypt loop operated on raw
+-- ciphertext bytes directly (old key -> new key) and assumed the fixed,
+-- no-IV, no-prefix legacy layout for every mapped column - after the backfill
+-- below, the three columns above are 'v2:'-framed instead, so that script has
+-- been updated in the same change as this migration to re-encrypt either
+-- shape under its own envelope (a v2 row gets a fresh IV; a legacy row, such
+-- as the still-unmigrated qbo_token_state/google_token_state columns, stays
+-- zero-IV). See that script's own comment for the detail.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION "public"."encrypt_text"("plaintext" "text") RETURNS "text"
