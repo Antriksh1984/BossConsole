@@ -439,7 +439,10 @@ expect object GitService {
      *
      * @param repositoryUrl The URL of the repository to clone (https://, git@, ssh://)
      * @param targetDirectory The directory where the repository should be cloned
-     * @param onProgress Callback for progress updates (receives progress messages)
+     * @param onProgress Callback for progress updates (receives progress messages). May be
+     *   invoked from a background reader thread, concurrently with the calling coroutine's own
+     *   thread - a caller writing shared/UI state from it must synchronize or dispatch onto its
+     *   own thread.
      * @return Result indicating success or failure with appropriate message
      */
     suspend fun cloneRepository(

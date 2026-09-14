@@ -10,6 +10,7 @@ import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.utils.logging.LogSanitizer
 import ai.rever.boss.window.WindowGitState
 import ai.rever.boss.window.WindowGitStateRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -2088,6 +2090,263 @@ actual object GitService {
 
     private const val DRAIN_BUFFER_CHARS = 8192
 
+    /** The bound [cloneRepository] enforces on a live git clone process. */
+    private const val CLONE_TIMEOUT_MS = 600_000L // 10 minutes
+
+    /**
+     * The bounded git-clone process execution [cloneRepository] delegates to, with an injectable
+     * [timeoutMs] so [BossConsole#641](https://github.com/risa-labs-inc/BossConsole/issues/641)'s
+     * silent-pipe hang can be reproduced and pinned with a short deadline instead of the real
+     * 10-minute one - the same reason [runProcessBounded] takes its bound as a parameter rather
+     * than a constant.
+     *
+     * Returns the same [GitOperationResult] shape as a successful or ordinary-failure clone.
+     * [TimeoutCancellationException] (from [timeoutMs] elapsing) and a plain
+     * [CancellationException] (from an external cancellation of the caller) both propagate
+     * uncaught - [cloneRepository]'s own catch chain distinguishes the two, since only the first
+     * gets a "timed out" message and both need the partial target directory cleaned up, which is
+     * this function's caller's job, not this one's: this function only ever owns the process and
+     * its reader. Either way, the process (and every helper it spawned) is always killed and its
+     * progress reader always joined before this function returns OR rethrows - see the `finally`
+     * block below.
+     *
+     * [onProgress] is invoked from two different threads over the life of one call: this
+     * coroutine's own thread for `"Initializing clone..."` and the completion message, and the
+     * progress reader's background thread for every line drained from the process's output. A
+     * caller writing shared or UI state from it must account for that - the Clone dialog's own
+     * callback does, since Compose snapshot state tolerates an off-main write.
+     */
+    internal suspend fun cloneProcessBounded(
+        repositoryUrl: String,
+        targetDirectory: String,
+        onProgress: (String) -> Unit,
+        timeoutMs: Long,
+    ): GitOperationResult =
+        withTimeout(timeoutMs) {
+            onProgress("Initializing clone...")
+
+            val process =
+                ProcessBuilder(
+                    "git",
+                    "clone",
+                    "--progress",
+                    repositoryUrl,
+                    targetDirectory,
+                ).apply {
+                    // Inherit parent process environment for SSH/git credentials
+                    environment().putAll(System.getenv())
+                }.redirectErrorStream(true) // Merge stderr into stdout for progress
+                    .start()
+
+            // Cleared before this function returns or rethrows, so a progressReader callback
+            // still in flight at that moment - the join below is bounded, not a guarantee the
+            // thread has actually stopped - cannot fire after: a late line arriving once this
+            // call has already resolved could otherwise land on a caller that has moved on (the
+            // Clone dialog's onProgress writes Compose state keyed to "still cloning"). A plain
+            // check-then-act flag is not enough: a reader thread that passes the check can be
+            // preempted and resume its onProgress call after the flag has already flipped and
+            // the completion callback has already fired, so the check and the flip share one
+            // lock instead - a reader can never observe "active" and then deliver after the
+            // flip has been made visible.
+            val progressLock = Any()
+            var progressActive = true
+            val progressReader =
+                drainCloneProgressAsync(process.inputStream) { line ->
+                    synchronized(progressLock) { if (progressActive) onProgress(line) }
+                }
+            try {
+                // process.waitFor() (no args) is the one blocking call here the JDK documents as
+                // interruptible - a Process wait is a monitor wait, not raw stream I/O. readLine()
+                // on the process's own pipe is NOT interruptible on any platform, which is why it
+                // runs on progressReader's own thread instead: a silent-but-alive git process
+                // previously blocked that readLine() forever, and since it ran inline in this
+                // coroutine, neither this withTimeout's own deadline nor an external cancellation
+                // of the caller's coroutine could reach the finally block below to kill it -
+                // cancellation only takes effect at a suspension point, and a raw blocking JVM
+                // call is not one. runInterruptible IS a suspension point: it converts this
+                // coroutine's cancellation (from either source) into a thread interrupt, which
+                // waitFor() responds to by throwing InterruptedException - which runInterruptible
+                // then turns back into the coroutine's own cancellation, so the timeout case
+                // surfaces as TimeoutCancellationException exactly as it did before, and an
+                // external cancellation propagates as a plain CancellationException.
+                val exitCode = runInterruptible(Dispatchers.IO) { process.waitFor() }
+
+                // The process exiting closes its own end of the pipe, but the reader thread
+                // noticing EOF and returning is a separate, unsynchronized event - join it (and
+                // stop it from firing again) before the one message that means "there is nothing
+                // more to show", or a trailing progress line can arrive after it.
+                progressReader.join(STREAM_DRAIN_TIMEOUT_SECONDS * 1000)
+                synchronized(progressLock) { progressActive = false }
+
+                cloneResultFor(exitCode, repositoryUrl, targetDirectory, onProgress)
+            } finally {
+                // Reached a second time (harmlessly - killing an already-dead tree and joining an
+                // already-finished thread are both no-ops) on the success/ordinary-failure path
+                // above, and for the FIRST time on this function's own timeout or an external
+                // cancellation of the caller. destroyProcessTree and Thread.join are both plain
+                // synchronous JVM calls, so both run fine here even while this coroutine is
+                // already cancelled.
+                synchronized(progressLock) { progressActive = false }
+                // Unconditional, not gated on process.isAlive: a helper that inherited the pipe
+                // (git-remote-https, ssh, a credential helper) can still be holding it open even
+                // once the top-level `git` process itself has exited, and destroyForcibly() on an
+                // already-dead process is a documented no-op - so the guard only ever loses the
+                // one case it would matter for, never saves real work.
+                destroyProcessTree(process)
+                progressReader.join(STREAM_DRAIN_TIMEOUT_SECONDS * 1000)
+            }
+        }
+
+    /** The [GitOperationResult] for a finished clone process, given its [exitCode]. */
+    private fun cloneResultFor(
+        exitCode: Int,
+        repositoryUrl: String,
+        targetDirectory: String,
+        onProgress: (String) -> Unit,
+    ): GitOperationResult =
+        if (exitCode == 0) {
+            onProgress("Clone completed successfully")
+            logger.info(
+                LogCategory.GENERAL,
+                "Repository cloned successfully",
+                mapOf("target" to targetDirectory),
+            )
+            GitSuccess()
+        } else {
+            val errorMessage =
+                when {
+                    repositoryUrl.contains("@") && exitCode == 128 -> {
+                        "Authentication failed. Please configure your SSH keys or git credentials."
+                    }
+
+                    exitCode == 128 -> {
+                        "Repository not found or access denied. Please check the URL and your permissions."
+                    }
+
+                    exitCode == 1 -> {
+                        "Network error. Please check your internet connection."
+                    }
+
+                    else -> {
+                        "Clone failed with exit code $exitCode. Please check the repository URL and try again."
+                    }
+                }
+            logger.error(
+                LogCategory.GENERAL,
+                "Clone failed",
+                mapOf("exitCode" to exitCode, "message" to errorMessage),
+            )
+            GitError(errorMessage)
+        }
+
+    /**
+     * Kills [process] and every live descendant it spawned, then waits (bounded) for all of them
+     * to actually exit.
+     *
+     * A plain `process.destroyForcibly()` was not enough for a clone over HTTP(S) or SSH: git
+     * forks helpers - `git-remote-https`, `ssh`, a credential helper - that inherit the parent's
+     * stdout pipe, so killing only the top-level `git` process can leave a helper still holding
+     * the write end open. The reader thread blocked on that pipe's `readLine()` then never sees
+     * EOF, no matter how forcefully the parent alone is killed - measured empirically: a parent-
+     * only kill left helper processes alive after the parent had already exited.
+     *
+     * Descendants are captured BEFORE killing anything: destroying the parent first risks
+     * reparenting a still-running child (to the platform's init process on Unix) before its
+     * handle is read, and a helper that has already exited on its own must not abort the one kill
+     * this function guarantees. [Process.descendants] is a JDK 9+ API that can be unavailable or
+     * refuse enumeration on a restricted platform/sandbox - guarded here so that failure degrades
+     * to "kill the parent only" rather than skipping the guaranteed kill entirely.
+     *
+     * The wait is bounded by one shared deadline, not [STREAM_DRAIN_TIMEOUT_SECONDS] per handle:
+     * this runs inside [cloneProcessBounded]'s own `finally`, on the caller's thread during
+     * cancellation, so a multi-helper tree waiting that long per handle serially would turn a
+     * bounded cleanup into a multi-times-[STREAM_DRAIN_TIMEOUT_SECONDS] stall on the very path
+     * meant to make cancellation prompt.
+     */
+    private fun destroyProcessTree(process: Process) {
+        val descendants =
+            runCatching { process.descendants().toList() }
+                .getOrElse { emptyList() }
+        process.destroyForcibly()
+        descendants.forEach { handle -> runCatching { handle.destroyForcibly() } }
+        val deadline = System.currentTimeMillis() + STREAM_DRAIN_TIMEOUT_SECONDS * 1000
+        process.waitFor(remainingMs(deadline), TimeUnit.MILLISECONDS)
+        descendants.forEach { handle ->
+            runCatching { handle.onExit().get(remainingMs(deadline), TimeUnit.MILLISECONDS) }
+        }
+    }
+
+    /** Milliseconds left until [deadline], never negative - a `get`/`waitFor` timeout must not be. */
+    private fun remainingMs(deadline: Long): Long = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
+
+    /**
+     * Reads [stream] line by line on its own daemon thread, forwarding recognized git-clone
+     * progress lines to [onProgress] as they arrive.
+     *
+     * A dedicated thread for the same reason [drainAsync] uses one: `readLine()` on a process's
+     * own pipe blocks until data or EOF and does not respond to `Thread.interrupt()` on any
+     * platform, so it cannot run inline in [cloneProcessBounded]'s cancellable coroutine - a
+     * silent-but-alive git process would block that coroutine forever, past its own timeout
+     * (BossConsole#641). The caller kills the process (closing this thread's pipe) on timeout or
+     * cancellation and joins this thread afterward; nothing here needs to be interruptible itself.
+     */
+    private fun drainCloneProgressAsync(
+        stream: java.io.InputStream,
+        onProgress: (String) -> Unit,
+    ): Thread =
+        Thread {
+            runCatching {
+                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        line?.let { progressLine ->
+                            // Git progress comes on stderr, but we redirected it to stdout.
+                            // Filter and send meaningful progress updates.
+                            when {
+                                progressLine.contains("Cloning into") -> {
+                                    onProgress("Cloning repository...")
+                                }
+
+                                progressLine.contains("remote: Counting objects") -> {
+                                    onProgress("Receiving objects...")
+                                }
+
+                                progressLine.contains("Receiving objects") -> {
+                                    val percentMatch = Regex("(\\d+)%").find(progressLine)
+                                    onProgress(
+                                        if (percentMatch != null) {
+                                            "Receiving objects: ${percentMatch.value}"
+                                        } else {
+                                            "Receiving objects..."
+                                        },
+                                    )
+                                }
+
+                                progressLine.contains("Resolving deltas") -> {
+                                    val percentMatch = Regex("(\\d+)%").find(progressLine)
+                                    onProgress(
+                                        if (percentMatch != null) {
+                                            "Resolving deltas: ${percentMatch.value}"
+                                        } else {
+                                            "Resolving deltas..."
+                                        },
+                                    )
+                                }
+
+                                progressLine.contains("Checking out files") -> {
+                                    onProgress("Checking out files...")
+                                }
+                            }
+                            logger.debug(LogCategory.GENERAL, "Clone progress: $progressLine")
+                        }
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+
     /**
      * Ceiling PER SINK, counted in CHARS, applied to stdout and stderr independently:
      * a UTF-8 byte stream decodes to at most as many chars, so the real ceiling is
@@ -2221,7 +2480,8 @@ actual object GitService {
      *
      * @param repositoryUrl The URL of the repository to clone
      * @param targetDirectory The directory where the repository should be cloned
-     * @param onProgress Callback for progress updates
+     * @param onProgress Callback for progress updates. May be invoked from [cloneProcessBounded]'s
+     *   background reader thread, concurrently with this coroutine's own thread.
      * @return GitOperationResult indicating success or failure
      */
     actual suspend fun cloneRepository(
@@ -2239,6 +2499,14 @@ actual object GitService {
                 ),
             )
 
+            // Set true only once cloneProcessBounded is actually invoked, so the cancellation
+            // cleanup below can tell "this clone's own partial output" apart from a pre-existing
+            // path - which the exists() guard a few lines down already refuses to touch. Nothing
+            // between here and that flip can suspend today (checkGitAvailable and the File checks
+            // are all plain blocking calls), so a cancellation cannot currently land before it -
+            // but the flag makes that an invariant of the code rather than a fact a future
+            // suspending validation step could silently break.
+            var cloneStarted = false
             try {
                 // Check if git is available
                 if (!checkGitAvailable()) {
@@ -2278,123 +2546,50 @@ actual object GitService {
                 }
 
                 // Execute git clone with progress, wrapped in timeout (10 minutes for large repos)
-                withTimeout(600_000L) {
-                    // 10 minutes timeout
-                    onProgress("Initializing clone...")
-
-                    val process =
-                        ProcessBuilder(
-                            "git",
-                            "clone",
-                            "--progress",
-                            repositoryUrl,
-                            targetDirectory,
-                        ).apply {
-                            // Inherit parent process environment for SSH/git credentials
-                            environment().putAll(System.getenv())
-                        }.redirectErrorStream(true) // Merge stderr into stdout for progress
-                            .start()
-
-                    try {
-                        // Read progress output
-                        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                            var line: String?
-                            while (reader.readLine().also { line = it } != null) {
-                                line?.let { progressLine ->
-                                    // Git progress comes on stderr, but we redirected it to stdout
-                                    // Filter and send meaningful progress updates
-                                    when {
-                                        progressLine.contains("Cloning into") -> {
-                                            onProgress("Cloning repository...")
-                                        }
-
-                                        progressLine.contains("remote: Counting objects") -> {
-                                            onProgress("Receiving objects...")
-                                        }
-
-                                        progressLine.contains("Receiving objects") -> {
-                                            // Extract percentage if available
-                                            val percentMatch = Regex("(\\d+)%").find(progressLine)
-                                            if (percentMatch != null) {
-                                                onProgress("Receiving objects: ${percentMatch.value}")
-                                            } else {
-                                                onProgress("Receiving objects...")
-                                            }
-                                        }
-
-                                        progressLine.contains("Resolving deltas") -> {
-                                            val percentMatch = Regex("(\\d+)%").find(progressLine)
-                                            if (percentMatch != null) {
-                                                onProgress("Resolving deltas: ${percentMatch.value}")
-                                            } else {
-                                                onProgress("Resolving deltas...")
-                                            }
-                                        }
-
-                                        progressLine.contains("Checking out files") -> {
-                                            onProgress("Checking out files...")
-                                        }
-                                    }
-                                    logger.debug(LogCategory.GENERAL, "Clone progress: $progressLine")
-                                }
-                            }
-                        }
-
-                        val exitCode = process.waitFor()
-
-                        if (exitCode == 0) {
-                            onProgress("Clone completed successfully")
-                            logger.info(
-                                LogCategory.GENERAL,
-                                "Repository cloned successfully",
-                                mapOf("target" to targetDirectory),
-                            )
-                            GitSuccess()
-                        } else {
-                            val errorMessage =
-                                when {
-                                    repositoryUrl.contains("@") && exitCode == 128 -> {
-                                        "Authentication failed. Please configure your SSH keys or git credentials."
-                                    }
-
-                                    exitCode == 128 -> {
-                                        "Repository not found or access denied. Please check the URL and your permissions."
-                                    }
-
-                                    exitCode == 1 -> {
-                                        "Network error. Please check your internet connection."
-                                    }
-
-                                    else -> {
-                                        "Clone failed with exit code $exitCode. Please check the repository URL and try again."
-                                    }
-                                }
-                            logger.error(
-                                LogCategory.GENERAL,
-                                "Clone failed",
-                                mapOf("exitCode" to exitCode, "message" to errorMessage),
-                            )
-                            GitError(errorMessage)
-                        }
-                    } finally {
-                        // Ensure process is destroyed if still running
-                        if (process.isAlive) {
-                            process.destroyForcibly()
-                        }
-                    }
-                }
+                cloneStarted = true
+                cloneProcessBounded(repositoryUrl, targetDirectory, onProgress, CLONE_TIMEOUT_MS)
             } catch (e: TimeoutCancellationException) {
                 val errorMessage =
                     "Clone operation timed out after 10 minutes. " +
                         "The repository may be too large or the connection too slow. Try cloning from terminal instead."
                 logger.error(LogCategory.GENERAL, errorMessage, error = e)
-                // Clean up partial clone
-                try {
-                    File(targetDirectory).deleteRecursively()
-                } catch (cleanupError: Exception) {
-                    logger.warn(LogCategory.GENERAL, "Failed to clean up after timeout", error = cleanupError)
+                // Clean up partial clone. Only ever a directory this clone itself created: the
+                // exists() guard above already refuses a pre-existing target, so cloneStarted can
+                // only be true once this call owns targetDirectory.
+                if (cloneStarted) {
+                    try {
+                        File(targetDirectory).deleteRecursively()
+                    } catch (cleanupError: Exception) {
+                        logger.warn(LogCategory.GENERAL, "Failed to clean up after timeout", error = cleanupError)
+                    }
                 }
                 GitError(errorMessage)
+            } catch (e: CancellationException) {
+                // The caller's own coroutine/job was cancelled - the Clone dialog leaving
+                // composition (the window closing mid-clone), not this function's own
+                // CLONE_TIMEOUT_MS, which is TimeoutCancellationException above and already
+                // caught by the more specific clause. cloneProcessBounded's finally block already
+                // killed the whole process tree with SIGKILL by the time this is reached, so git
+                // never got to remove its own partial clone the way it would on an ordinary
+                // failure - without this cleanup, the "Directory already exists" guard above
+                // would then refuse every retry at this same path. Must rethrow rather than
+                // return a GitError: swallowing CancellationException here would break the
+                // caller's own structured concurrency.
+                logger.info(LogCategory.GENERAL, "Clone cancelled", mapOf("target" to targetDirectory))
+                // Gated on cloneStarted for the same reason as the timeout branch above: only
+                // delete a directory this clone created. Today nothing between the exists() guard
+                // and the cloneStarted flip can suspend, so this is unreachable-but-unguarded
+                // defense - if a future validation step ever became suspending, an un-gated
+                // delete here would recursively remove a pre-existing directory the exists()
+                // guard was written specifically to leave alone.
+                if (cloneStarted) {
+                    try {
+                        File(targetDirectory).deleteRecursively()
+                    } catch (cleanupError: Exception) {
+                        logger.warn(LogCategory.GENERAL, "Failed to clean up after cancellation", error = cleanupError)
+                    }
+                }
+                throw e
             } catch (e: IOException) {
                 val errorMessage =
                     when {
