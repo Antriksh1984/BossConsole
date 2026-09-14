@@ -90,7 +90,11 @@ class RunConfigDataProviderProxy(
             try {
                 stub.watchLastError(Empty.getDefaultInstance()).collect { response ->
                     synchronized(errorLock) {
-                        hostError = response.value.takeIf { it.isNotEmpty() }
+                        val incomingError = response.value.takeIf { it.isNotEmpty() }
+                        // A new scan failure supersedes run feedback; a replay of the same
+                        // host snapshot must not erase a newer local execution failure.
+                        if (incomingError != null && incomingError != hostError) localExecutionError = null
+                        hostError = incomingError
                         _lastError.value = localExecutionError ?: hostError
                     }
                 }
@@ -110,6 +114,7 @@ class RunConfigDataProviderProxy(
         projectPath: String,
         windowId: String,
     ) {
+        clearLocalExecutionError()
         try {
             stub.scanProject(
                 ScanProjectRequest
@@ -143,7 +148,7 @@ class RunConfigDataProviderProxy(
             // Do not infer a stale id from every RPC failure (transport and authorization
             // failures can reach this path too), or expose arbitrary remote exception text.
             synchronized(errorLock) {
-                localExecutionError = "Run could not be started. Refresh the configurations and try again."
+                localExecutionError = "Run could not be started."
                 _lastError.value = localExecutionError
             }
         }

@@ -95,7 +95,8 @@ class RunConfigServiceBridge(
     }
 
     override suspend fun scanProject(request: ScanProjectRequest): Empty {
-        authenticatedCallerOrRefuse("scanProject")
+        val caller = authenticatedCallerOrRefuse("scanProject")
+        logger.info(LogCategory.AUTH, "Run configuration scan requested", mapOf("caller" to caller))
         provider.scanProject(request.projectPath, request.windowId)
         return Empty.getDefaultInstance()
     }

@@ -32,6 +32,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -98,7 +99,7 @@ class RunConfigDataProviderProxyTest {
         }
 
     @Test
-    fun `a successful execute does not touch lastError`() =
+    fun `a successful execute without errors keeps lastError empty`() =
         runBlocking {
             withTimeout(10_000) {
                 proxy.execute(config(FakeRunConfigurationService.ACCEPTED_ID), "w1")
@@ -152,9 +153,11 @@ class RunConfigDataProviderProxyTest {
     fun `transport failure reports failure without claiming a stale id`() =
         runBlocking {
             withTimeout(10_000) {
+                proxy.execute(config("stale-id"), "w1")
+                val refusal = proxy.lastError.value
                 proxy.execute(config("offline"), "w1")
                 val error = assertNotNull(proxy.lastError.value)
-                assertFalse(error.contains("no longer known"))
+                assertEquals(refusal, error)
                 assertFalse(error.contains("remote details"))
             }
         }
@@ -176,10 +179,17 @@ class RunConfigDataProviderProxyTest {
         runBlocking {
             withTimeout(10_000) {
                 fakeService.blockOperation = "scan"
-                val calling = async { proxy.scanProject("/repo", "w1") }
+                val continued = AtomicBoolean(false)
+                val calling =
+                    async {
+                        proxy.scanProject("/repo", "w1")
+                        continued.set(true)
+                    }
                 fakeService.blocked.await()
                 calling.cancel()
                 assertFailsWith<CancellationException> { calling.await() }
+                calling.join()
+                assertFalse(continued.get(), "cancellation must not return normally from the proxy call")
                 assertNull(proxy.lastError.value)
             }
         }
@@ -189,11 +199,51 @@ class RunConfigDataProviderProxyTest {
         runBlocking {
             withTimeout(10_000) {
                 fakeService.blockOperation = "clear"
-                val calling = async { proxy.clearError() }
+                val continued = AtomicBoolean(false)
+                val calling =
+                    async {
+                        proxy.clearError()
+                        continued.set(true)
+                    }
                 fakeService.blocked.await()
                 calling.cancel()
                 assertFailsWith<CancellationException> { calling.await() }
+                calling.join()
+                assertFalse(continued.get(), "cancellation must not return normally from the proxy call")
                 assertNull(proxy.lastError.value)
+            }
+        }
+
+    @Test
+    fun `a new host scan failure supersedes a local run failure`() =
+        runBlocking {
+            withTimeout(10_000) {
+                proxy.execute(config("stale-id"), "w1")
+                fakeService.errors.send("new scan failure")
+                assertEquals("new scan failure", proxy.lastError.first { it == "new scan failure" })
+            }
+        }
+
+    @Test
+    fun `a successful run preserves a pending host error`() =
+        runBlocking {
+            withTimeout(10_000) {
+                fakeService.errors.send("host failure")
+                proxy.lastError.first { it == "host failure" }
+                proxy.execute(config(FakeRunConfigurationService.ACCEPTED_ID), "w1")
+                assertEquals("host failure", proxy.lastError.value)
+            }
+        }
+
+    @Test
+    fun `a new scan clears local run feedback even when the host error is unchanged`() =
+        runBlocking {
+            withTimeout(10_000) {
+                fakeService.errors.send("host failure")
+                proxy.lastError.first { it == "host failure" }
+                proxy.execute(config("stale-id"), "w1")
+                proxy.scanProject("/repo", "w1")
+                assertEquals("host failure", proxy.lastError.value)
             }
         }
 
