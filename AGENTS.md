@@ -2114,3 +2114,25 @@ The idle activity entry appears only while MCP tools are exposed (existing histo
 The viewer uses the ledger instance's actual optional persistence path. Its tooltip follows the host
 heavyweight overlay route. Width and height follow the originating window, with a fixed-cap fallback
 while window metadata is not yet measured; Close stays outside the scrolling body.
+
+**The "Persisted MCP policies" bottom bar button also lets an operator set a rule
+*proactively*, for a registered tool without a saved rule.** It is present even with zero saved
+rules (labeled "Set MCP tool policies" then). Allow requires a second confirming tap
+and shows the tool's risk assessment first, the same way the approval dialog's own
+"Always Allow" does, since it is the same durable, tool-name-wide grant. The write goes
+through `McpPolicyEngine.setToolPolicyIfAbsent`, not the reactive approval path's
+`setToolPolicy` - the proactive contract is "add a rule only while this tool still has
+none of its own," and `expectedRevocation`/`providerId` (captured when the tool was
+offered as a candidate, via `mcpProactivePolicyCandidates` /
+`McpToolIdentity.expectedRevocation`) alone cannot enforce that: `revocationVersion`
+only moves on a revoke, so an intervening explicit ASK or ALLOW made through the
+reactive approval dialog for this same tool never trips it, and a `preserveDeny`-style
+guard would let the proactive write silently clobber that decision. `setToolPolicyIfAbsent`
+re-checks `toolName !in rules` under the same lock the write itself takes, atomically, so
+any rule present at write time - not only a DENY - refuses the write instead. The same
+lock also refuses provider DENY and unreadable-policy faults, preserving damaged files
+for manual recovery. Refused writes refresh candidates and require a fresh confirmation;
+storage failures get separate feedback. Stable DENY and damaged-file refusals are explained
+inside the dialog, including backup/recovery guidance. Confirmation is tied to the full candidate snapshot.
+These privileged writes remain beside host policy enforcement. #416 tracks the separate
+observation/plugin architecture; this PR does not expose a policy writer to plugins.
