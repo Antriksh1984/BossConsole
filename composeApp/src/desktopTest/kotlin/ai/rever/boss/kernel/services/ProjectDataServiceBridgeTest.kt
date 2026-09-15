@@ -257,8 +257,7 @@ class ProjectDataServiceBridgeTest {
                             .filter { response ->
                                 val awaitedPath = if (emissions.isEmpty()) seed.path else second.path
                                 response.projectsList.any { it.path == awaitedPath }
-                            }
-                            .take(2)
+                            }.take(2)
                             .collect { emissions += it.projectsList.map { p -> p.path } }
                     }
                 withTimeout(5_000) {
