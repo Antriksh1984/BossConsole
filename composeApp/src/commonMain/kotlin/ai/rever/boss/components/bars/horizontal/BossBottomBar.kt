@@ -16,7 +16,6 @@ import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.window_panel.components.main_window_panels.BossTabsComponent
 import ai.rever.boss.layout.BossChrome
 import ai.rever.boss.mcp.McpPolicyAction
-import ai.rever.boss.mcp.McpProactivePolicyOutcome
 import ai.rever.boss.mcp.McpToolPolicyConfig
 import ai.rever.boss.mcp.McpToolRegistryImpl
 import ai.rever.boss.performance.PerformanceState
@@ -362,8 +361,9 @@ private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfi
     }
     if (showPolicyManager) {
         val disabledToolNames by McpToolRegistryImpl.disabledToolNames.collectAsState()
+        var candidateRefresh by remember { mutableStateOf(0) }
         val availableTools =
-            remember(allTools, persistedPolicyConfig.rules, disabledToolNames) {
+            remember(allTools, persistedPolicyConfig.rules, disabledToolNames, candidateRefresh) {
                 mcpProactivePolicyCandidates(
                     allTools,
                     persistedPolicyConfig.rules,
@@ -399,9 +399,10 @@ private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfi
                         action,
                         expectedRevocation = tool.expectedRevocation,
                         providerId = tool.providerId,
-                    ) is McpProactivePolicyOutcome.Saved
+                    )
                 }
             },
+            onRefreshCandidates = { candidateRefresh++ },
             onDismiss = { showPolicyManager = false },
         )
     }

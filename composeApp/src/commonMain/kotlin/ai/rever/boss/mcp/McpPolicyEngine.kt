@@ -47,16 +47,13 @@ sealed interface McpPolicyFault {
 }
 
 /**
- * Outcome of [McpPolicyEngine.setToolPolicyIfAbsent]. A plain `Boolean` cannot tell a caller
- * "someone else already decided this, there is nothing to retry" ([Refused]) apart from
- * "the guard passed but the disk write itself failed" ([Failed]) - conflating them would log a
- * correctly-refused write as a fault, and would give an operator-facing retry prompt for a
- * refusal retrying can never fix.
+ * Result of an atomic proactive write. Refusals need a refreshed candidate and a new
+ * operator decision; storage failures need storage recovery. Neither is a saved rule.
  */
 sealed interface McpProactivePolicyOutcome {
     data object Saved : McpProactivePolicyOutcome
 
-    /** The revocation check failed, or the tool already has a rule of its own. */
+    /** The candidate is stale, a rule exists, or an effective DENY/fault blocks the write. */
     data object Refused : McpProactivePolicyOutcome
 
     data class Failed(
@@ -301,7 +298,7 @@ class McpPolicyEngine(
      * absent" contract this call exists for.
      *
      * Returns [McpProactivePolicyOutcome] rather than [Boolean]: the caller needs to tell a
-     * refusal (someone else already decided; nothing to retry) apart from a genuine disk
+     * refusal (refresh policy context before retrying) apart from a genuine disk
      * failure (this operator's own choice did not take), which a bare `false` cannot express.
      */
     fun setToolPolicyIfAbsent(
@@ -311,7 +308,9 @@ class McpPolicyEngine(
         providerId: String? = null,
     ): McpProactivePolicyOutcome =
         synchronized(lock) {
-            if (revocationVersion(toolName, providerId) != expectedRevocation || toolName in _config.value.rules) {
+            if (revocationVersion(toolName, providerId) != expectedRevocation ||
+                toolName in _config.value.rules || policyFor(toolName, providerId) == McpPolicyAction.DENY
+            ) {
                 return@synchronized McpProactivePolicyOutcome.Refused
             }
             writeConfig(

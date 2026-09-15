@@ -144,4 +144,54 @@ class McpPolicyEngineAddOnlyIfAbsentTest {
         // A refusal is not a fault - nothing was actually attempted on disk.
         assertNull(reportedFault)
     }
+
+    @Test
+    fun `provider deny refuses proactive writes without leaving a latent allow`() {
+        val file = createTempPolicyFile()
+        val engine = McpPolicyEngine(policyFile = file)
+        val generation = engine.revocationVersion("run_command", "provider")
+        engine.setProviderPolicy("provider", McpPolicyAction.DENY)
+        assertEquals(
+            McpProactivePolicyOutcome.Refused,
+            engine.setToolPolicyIfAbsent("run_command", McpPolicyAction.ALLOW, generation, "provider"),
+        )
+        assertNull(engine.config.value.rules["run_command"])
+        engine.revokeProviderPolicy("provider")
+        assertEquals(McpPolicyAction.ASK, McpPolicyEngine(policyFile = file).policyFor("run_command", "provider"))
+    }
+
+    @Test
+    fun `damaged policy is never overwritten by a proactive allow or deny`() {
+        val file = createTempPolicyFile()
+        file.writeText("broken policy")
+        val engine = McpPolicyEngine(policyFile = file)
+        for (action in listOf(McpPolicyAction.ALLOW, McpPolicyAction.DENY)) {
+            assertEquals(
+                McpProactivePolicyOutcome.Refused,
+                engine.setToolPolicyIfAbsent("run_command", action, engine.revocationVersion("run_command")),
+            )
+            assertEquals("broken policy", file.readText())
+            assertIs<McpPolicyFault.PersistedPolicyUnreadable>(engine.fault.value)
+        }
+    }
+
+    @Test
+    fun `fresh candidate can retry after provider reset without reusing stale approval`() {
+        val engine = McpPolicyEngine(policyFile = createTempPolicyFile())
+        val stale = engine.revocationVersion("run_command", "provider")
+        engine.revokeProviderPolicy("provider")
+        assertEquals(
+            McpProactivePolicyOutcome.Refused,
+            engine.setToolPolicyIfAbsent("run_command", McpPolicyAction.ALLOW, stale, "provider"),
+        )
+        assertEquals(
+            McpProactivePolicyOutcome.Saved,
+            engine.setToolPolicyIfAbsent(
+                "run_command",
+                McpPolicyAction.DENY,
+                engine.revocationVersion("run_command", "provider"),
+                "provider",
+            ),
+        )
+    }
 }
