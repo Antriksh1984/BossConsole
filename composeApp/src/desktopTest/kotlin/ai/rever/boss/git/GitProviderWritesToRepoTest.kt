@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.GitOperationResultData
 import ai.rever.boss.plugin.git.GitOperationResult
 import ai.rever.boss.window.WindowGitState
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -559,6 +560,116 @@ class GitProviderWritesToRepoTest {
 
             assertEquals(1, windowA.stashList.value.size, "A's window must show its own stash")
             assertTrue(windowB.stashList.value.isEmpty(), "B's window state must not be touched by A's refresh")
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
+    fun stashSuccessRefreshUpdatesTheInvokingWindowsStashListAndFileStatus(
+        @TempDir tmp: File,
+    ) = runTest {
+        // Mirrors BossTopBar's onStash success handler exactly: stash(override), then
+        // refreshStashListForWindow + getStatusForWindow against the SAME window state. The
+        // helper-only test above (refreshStashListForWindowUpdatesOnlyTheRequestedWindowsState)
+        // passes even if BossTopBar never called it - this one fails if that call is removed,
+        // since nothing else populates the window's stash list or file status here.
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val dir = repo(tmp)
+            File(dir, "tracked.txt").writeText("dirty\n")
+            val window = WindowGitState("w")
+            GitService.refreshForWindow(dir.absolutePath, window)
+            assertTrue(window.stashList.value.isEmpty(), "precondition: no stash yet")
+
+            val result = GitService.stash(projectPathOverride = dir.absolutePath)
+            assertTrue(result is GitOperationResult.Success, "stash reported $result")
+            GitService.refreshStashListForWindow(window)
+            GitService.getStatusForWindow(window)
+
+            assertEquals(
+                1,
+                window.stashList.value.size,
+                "the invoking window's own stash list was not refreshed after a successful stash",
+            )
+            assertTrue(
+                window.fileStatus.value.none { it.path == "tracked.txt" },
+                "the invoking window's file status was not refreshed after stash: ${window.fileStatus.value}",
+            )
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
+    fun refreshStashListForWindowDoesNotPublishStaleDataAfterTheWindowSwitchesProjectsMidRead(
+        @TempDir tmpA: File,
+        @TempDir tmpB: File,
+    ) = runTest {
+        // git stash list is a real subprocess round trip on Dispatchers.IO; launching the read
+        // and switching the window's project on the very next line (no suspension in between)
+        // reliably lands the switch before or very early into that round trip, since a process
+        // spawn is orders of magnitude slower than the coroutine dispatch below it. A's stash
+        // must not land in a window that has already moved on to B.
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val repoA = repo(tmpA)
+            val repoB = repo(tmpB)
+            File(repoA, "tracked.txt").writeText("A-two\n")
+            git(repoA, "stash", "push")
+
+            val window = WindowGitState("w")
+            GitService.refreshForWindow(repoA.absolutePath, window)
+
+            val job = launch { GitService.refreshStashListForWindow(window) }
+            window.setProjectPath(repoB.absolutePath)
+            job.join()
+
+            assertTrue(
+                window.stashList.value.isEmpty(),
+                "A's stash was published into a window already switched to B: ${window.stashList.value}",
+            )
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
+    fun refreshStashListForWindowDoesNotPublishStaleDataAfterTheWindowClearsMidRead(
+        @TempDir tmp: File,
+    ) = runTest {
+        // Same race as above, for the "window closed" shape rather than "window switched
+        // projects": BossTopBar's own LaunchedEffect calls windowGitState.clear() when a
+        // window's project goes blank, which is indistinguishable here from a genuine close.
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val dir = repo(tmp)
+            File(dir, "tracked.txt").writeText("dirty\n")
+            git(dir, "stash", "push")
+
+            val window = WindowGitState("w")
+            GitService.refreshForWindow(dir.absolutePath, window)
+
+            val job = launch { GitService.refreshStashListForWindow(window) }
+            window.clear()
+            job.join()
+
+            assertTrue(
+                window.stashList.value.isEmpty(),
+                "stash data was published into a window that had already cleared: ${window.stashList.value}",
+            )
         } finally {
             if (globalBefore == null) {
                 GitService.clearCurrentProjectPathForTests()
