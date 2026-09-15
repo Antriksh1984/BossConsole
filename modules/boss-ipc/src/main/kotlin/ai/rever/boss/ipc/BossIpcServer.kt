@@ -34,9 +34,12 @@ class BossIpcServer(
      * instead of trusting a request field (BossConsole#53). Null (the default) installs no interceptor,
      * which is a no-op for a service that never checks identity - most `BossIpcServer` instances (every
      * child process's own `processServer`, every test server) have no use for one. It stops being a
-     * no-op for a server hosting any service that requires a verified process identity: with no
-     * registry, every guarded call is refused. Any kernel server hosting identity-enforcing
-     * bridges must be constructed with a real registry, including services registered after start.
+     * no-op for a server hosting a service that fails closed on a missing identity - a growing list
+     * under `ai.rever.boss.kernel.services`, deliberately not enumerated here since the list has
+     * already drifted stale once: check each bridge's own KDoc for whether it requires identity.
+     * With no registry, every call to such a service is refused, not merely unauthenticated as
+     * before - a silent total outage rather than the pre-BossConsole#53 status quo. Any kernel
+     * server hosting one of those bridges must be constructed with a real registry.
      */
     private val tokenRegistry: ProcessTokenRegistry? = null,
 ) {
