@@ -394,19 +394,25 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
         detected: DetectedMainFunction,
         projectPath: String,
         forWindows: Boolean,
+        // Defaulted, not read again inside tempFilePath: a test that also controls forWindows
+        // wants a host-independent fixed value here too, so the two standalone-fallback tests
+        // (Kotlin, Rust) discriminate on the platform argument rather than incidentally on
+        // whichever OS the CI runner happens to be - see resolveUpdaterTempDir for the same
+        // reasoning applied to the updater's own temp-dir resolution.
+        tempDir: String = System.getProperty("java.io.tmpdir"),
     ): String {
         // Find the actual project root by walking up from the file's directory
         val fileDir = File(detected.filePath).parentFile
         val projectDir = findProjectRootInternal(fileDir) ?: File(projectPath)
 
         return when (detected.language) {
-            Language.KOTLIN -> generateKotlinCommand(detected, projectDir, forWindows)
+            Language.KOTLIN -> generateKotlinCommand(detected, projectDir, forWindows, tempDir)
             Language.JAVA -> generateJavaCommand(detected, projectDir, forWindows)
             Language.PYTHON -> generatePythonCommand(detected, forWindows)
             Language.JAVASCRIPT -> generateJavaScriptCommand(detected, forWindows)
             Language.TYPESCRIPT -> generateTypeScriptCommand(detected, forWindows)
             Language.GO -> generateGoCommand(detected, forWindows)
-            Language.RUST -> generateRustCommand(detected, projectDir, forWindows)
+            Language.RUST -> generateRustCommand(detected, projectDir, forWindows, tempDir)
             Language.UNKNOWN -> "echo 'Unknown language'"
         }
     }
@@ -463,6 +469,7 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
         detected: DetectedMainFunction,
         projectDir: File,
         forWindows: Boolean,
+        tempDir: String,
     ): String {
         val filePath = detected.filePath
 
@@ -483,7 +490,7 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
 
         // Fallback: compile and run with kotlinc (for simple standalone files)
         val jarName = File(filePath).nameWithoutExtension.replace("'", "_")
-        val jarPath = tempFilePath("$jarName.jar")
+        val jarPath = tempFilePath(tempDir, "$jarName.jar")
         val compileCmd =
             "kotlinc ${shellEscape(filePath, forWindows)} -include-runtime -d ${shellEscape(jarPath, forWindows)}"
         val runCmd = "java -jar ${shellEscape(jarPath, forWindows)}"
@@ -584,7 +591,10 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
      *
      * The POSIX `'\''` idiom this used to emit unconditionally is a PowerShell parse
      * error (`The string is missing the terminator`), and every run-gutter command on
-     * Windows is handed to PowerShell, not a POSIX shell. [forWindows] defaults to the
+     * Windows is handed to PowerShell BY DEFAULT (`TerminalSettings.windowsShell`) - the
+     * same assumption [ai.rever.boss.components.workspaces.CommandProcessor.quotePath]
+     * documents making, with the same gap: under the opt-in cmd.exe shell both are wrong
+     * together, a pre-existing, shared gap, not introduced here. [forWindows] defaults to the
      * real host so every call site is unaffected; it takes a parameter, mirroring
      * [ShellUtils.escapeForDoubleQuotes]'s two-argument overload, so tests can exercise
      * both branches regardless of which OS happens to run them.
@@ -595,11 +605,17 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
     ): String = if (forWindows) ShellPathQuoting.powershell(str) else ShellPathQuoting.posix(str)
 
     /**
-     * A path under the JVM's own temp directory, not a hardcoded `/tmp` - which Windows
-     * resolves against the current drive's root (`[System.IO.Path]::GetFullPath('/tmp/x')`
-     * -> `C:\tmp\x`), not a temp directory at all (BossConsole#594).
+     * A path under [tempDir] (the caller's resolved temp directory - see [generateCommand]'s
+     * own parameter), not a hardcoded `/tmp` - which Windows resolves against the current
+     * drive's root (`[System.IO.Path]::GetFullPath('/tmp/x')` -> `C:\tmp\x`), not a temp
+     * directory at all (BossConsole#594). Takes the directory as a parameter, rather than
+     * reading the system property itself, so a test can inject a fixed value and assert
+     * against it regardless of which OS actually runs the test.
      */
-    private fun tempFilePath(name: String): String = File(System.getProperty("java.io.tmpdir"), name).absolutePath
+    private fun tempFilePath(
+        tempDir: String,
+        name: String,
+    ): String = File(tempDir, name).absolutePath
 
     private fun generatePythonCommand(
         detected: DetectedMainFunction,
@@ -626,6 +642,7 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
         detected: DetectedMainFunction,
         projectDir: File,
         forWindows: Boolean,
+        tempDir: String,
     ): String {
         val filePath = detected.filePath
 
@@ -640,11 +657,15 @@ class DesktopMainFunctionDetector : MainFunctionDetector {
             return "cargo run"
         }
 
-        // Fallback: Compile and run the specific Rust file directly
+        // Fallback: Compile and run the specific Rust file directly. `-o` names the compiled
+        // binary; Windows needs a .exe suffix for it to be directly launchable.
         val outputName = File(filePath).nameWithoutExtension.replace("'", "_")
-        val outputPath = tempFilePath(outputName)
+        val outputPath = tempFilePath(tempDir, if (forWindows) "$outputName.exe" else outputName)
         val compileCmd = "rustc ${shellEscape(filePath, forWindows)} -o ${shellEscape(outputPath, forWindows)}"
-        val runCmd = shellEscape(outputPath, forWindows)
+        // A bare quoted path is a COMMAND on POSIX but a STRING EXPRESSION in PowerShell - it
+        // would be printed, not run. The call operator (&) is what tells PowerShell to invoke
+        // the value as a command; POSIX has no such distinction and needs none.
+        val runCmd = if (forWindows) "& ${shellEscape(outputPath, forWindows)}" else shellEscape(outputPath, forWindows)
         return listOf(compileCmd, runCmd).joinToString(ShellUtils.separatorFor(forWindows))
     }
 

@@ -403,21 +403,30 @@ class MainFunctionDetectorTest {
     }
 
     // ==================== generateCommand: standalone-file compile+run fallback ====================
+    //
+    // Every assertion below is against an INJECTED fake temp dir, via generateCommand's
+    // 4-argument overload - not System.getProperty("java.io.tmpdir"). A test that reads the
+    // real property to build its own expectation would pass against the pre-fix hardcoded
+    // "/tmp" on any host where the real property happens to BE "/tmp" (ubuntu-latest, for
+    // instance) - discriminating on the CI matrix rather than on the code, which is exactly
+    // the failure mode BossConsole#594's own quoting fix was written to close.
 
     @Test
-    fun `standalone kotlin file falls back to compiling into the real system temp dir, not literal tmp`(
+    fun `standalone kotlin file falls back to compiling into the injected temp dir, not literal tmp`(
         @TempDir tempDir: File,
     ) {
         val source = File(tempDir, "Scratch.kt").apply { writeText("fun main() {}") }
-        val expectedJar = File(System.getProperty("java.io.tmpdir"), "Scratch.jar").absolutePath
+        val fakeTempDir = "/fake-temp-dir"
+        val expectedJar = File(fakeTempDir, "Scratch.jar").absolutePath
 
         val posix =
             detector.generateCommand(
                 detectedIn(source.absolutePath, Language.KOTLIN),
                 tempDir.absolutePath,
                 forWindows = false,
+                tempDir = fakeTempDir,
             )
-        assertTrue(posix.contains("-d '$expectedJar'"), "expected the real temp dir in: $posix")
+        assertTrue(posix.contains("-d '$expectedJar'"), "expected the injected temp dir in: $posix")
         assertTrue(posix.contains("java -jar '$expectedJar'"))
         assertTrue(posix.contains(" && "), "posix chains with && so a failed compile skips the run")
 
@@ -426,26 +435,56 @@ class MainFunctionDetectorTest {
                 detectedIn(source.absolutePath, Language.KOTLIN),
                 tempDir.absolutePath,
                 forWindows = true,
+                tempDir = fakeTempDir,
             )
         assertTrue(windows.contains("-d '$expectedJar'"))
         assertTrue(windows.contains("; "), "powershell chains with ; not &&")
     }
 
     @Test
-    fun `standalone rust file falls back to compiling into the real system temp dir, not literal tmp`(
+    fun `standalone rust file falls back to compiling into the injected temp dir, not literal tmp`(
         @TempDir tempDir: File,
     ) {
         val source = File(tempDir, "scratch.rs").apply { writeText("fn main() {}") }
-        val expectedOutput = File(System.getProperty("java.io.tmpdir"), "scratch").absolutePath
+        val fakeTempDir = "/fake-temp-dir"
 
-        val command =
+        val posix =
             detector.generateCommand(
                 detectedIn(source.absolutePath, Language.RUST),
                 tempDir.absolutePath,
                 forWindows = false,
+                tempDir = fakeTempDir,
             )
-        assertTrue(command.contains("-o '$expectedOutput'"), "expected the real temp dir in: $command")
-        assertTrue(command.endsWith("'$expectedOutput'"))
+        val expectedPosixOutput = File(fakeTempDir, "scratch").absolutePath
+        assertTrue(posix.contains("-o '$expectedPosixOutput'"), "expected the injected temp dir in: $posix")
+        assertTrue(posix.endsWith("'$expectedPosixOutput'"), "POSIX runs the bare quoted path directly: $posix")
+    }
+
+    @Test
+    fun `on windows, the compiled rust binary gets an exe suffix and is invoked with the call operator`(
+        @TempDir tempDir: File,
+    ) {
+        // BossConsole#705 review finding: a bare quoted path is a STRING EXPRESSION in
+        // PowerShell, not a command - without "&" the compiled program is never launched, and
+        // without ".exe" `rustc -o` produces a file PowerShell's command resolution may not
+        // run at all even when invoked correctly.
+        val source = File(tempDir, "scratch.rs").apply { writeText("fn main() {}") }
+        val fakeTempDir = "/fake-temp-dir"
+
+        val windows =
+            detector.generateCommand(
+                detectedIn(source.absolutePath, Language.RUST),
+                tempDir.absolutePath,
+                forWindows = true,
+                tempDir = fakeTempDir,
+            )
+
+        val expectedWindowsOutput = File(fakeTempDir, "scratch.exe").absolutePath
+        assertTrue(windows.contains("-o '$expectedWindowsOutput'"), "expected a .exe output path in: $windows")
+        assertTrue(
+            windows.endsWith("& '$expectedWindowsOutput'"),
+            "expected the call operator before the compiled binary in: $windows",
+        )
     }
 
     // ==================== generateCommand: project-aware commands ====================
