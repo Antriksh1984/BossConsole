@@ -41,7 +41,7 @@ object CliBootstrap {
      */
     fun isHeadlessCli(args: Array<String>): Boolean {
         val firstNonFlag = args.firstOrNull { !it.startsWith("-") }?.lowercase()
-        return firstNonFlag in setOf("status", "doctor", "mcp", "completion") ||
+        return firstNonFlag in setOf("status", "doctor", "mcp", "completion", "plugin") ||
             (args.isNotEmpty() && args.all { it in setOf("-h", "--help") })
     }
 

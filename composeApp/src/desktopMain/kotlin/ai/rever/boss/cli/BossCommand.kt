@@ -556,6 +556,16 @@ class BossCompletionCommand : CliktCommand(name = "completion") {
 }
 
 /**
+ * Plugin developer tools and lifecycle management.
+ * Subcommands (init, validate, link) provide scaffolding, validation, and hot-linking.
+ */
+class BossPluginCommand : CliktCommand(name = "plugin") {
+    override fun help(context: Context) = "Plugin developer tools and lifecycle management"
+
+    override fun run() = Unit
+}
+
+/**
  * Configures Clikt command structure.
  */
 fun createBossCLI(): BossCommand =
@@ -569,6 +579,11 @@ fun createBossCLI(): BossCommand =
         BossDoctorCommand(),
         BossMcpCommand(),
         BossCompletionCommand(),
+        BossPluginCommand().subcommands(
+            BossPluginInitCommand(),
+            BossPluginValidateCommand(),
+            BossPluginLinkCommand(),
+        ),
     )
 
 /** Configure before any BOSS logger initializes, keeping machine-readable stdout clean. */

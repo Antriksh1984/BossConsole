@@ -26,6 +26,7 @@ You can install or update the CLI symlinks inside BossConsole via **Toolbox → 
 | `boss status` | Checks running BossConsole health and status | `boss status --json` |
 | `boss doctor` | Reports health problems with suggested next steps (exit `2` when degraded) | `boss doctor --json` |
 | `boss mcp <action>` | Discovers and invokes MCP tools | `boss mcp list` |
+| `boss plugin <action>` | Developer CLI: scaffold, validate, and link plugins | `boss plugin init my-tool` |
 | `boss completion <shell>` | Generates shell tab-completion scripts | `boss completion bash > ~/.boss-complete.sh` |
 
 ---
@@ -52,7 +53,7 @@ boss status --json
 ```json
 {
   "running": true,
-  "version": "9.5.7",
+  "version": "9.5.10",
   "os": "Windows 11",
   "arch": "amd64",
   "activeProject": "BossConsole",
@@ -191,6 +192,33 @@ echo "source ~/.zsh/_boss" >> ~/.zshrc
 
 # Fish completion setup
 boss completion fish > ~/.config/fish/completions/boss.fish
+```
+
+---
+
+## Plugin Developer CLI (`boss plugin`)
+
+The `boss plugin` command suite accelerates developing third-party plugins with scaffolding, validation, and hot-linking. See [`docs/PLUGIN_LAUNCHPAD.md`](PLUGIN_LAUNCHPAD.md) for full specifications.
+
+### 1. `boss plugin init <name>`
+Scaffolds a new plugin project across templates (`mcp-tool`, `ui-panel`, `background-service`, `full`):
+```bash
+boss plugin init my-tool --template mcp-tool
+boss plugin init my-service --template background-service --dir ~/plugins/my-service --json
+```
+
+### 2. `boss plugin validate [<path>]`
+Validates a plugin source directory or packaged `.jar` against manifest rules, permitted permissions, and bytecode entrypoints:
+```bash
+boss plugin validate
+boss plugin validate build/libs/my-plugin-0.1.0.jar --json
+```
+
+### 3. `boss plugin link [<path>]`
+Links the plugin into `$BOSS_HOME/plugins/dev/<plugin-id>`. If BossConsole is running, triggers a live hot-reload over the loopback IPC socket:
+```bash
+boss plugin link
+boss plugin link . --json
 ```
 
 ---
