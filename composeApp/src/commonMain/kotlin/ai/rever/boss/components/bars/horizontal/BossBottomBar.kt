@@ -399,18 +399,19 @@ private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfi
             // clobber it (review on #636). tool.expectedRevocation is still passed, and still
             // checked first, to catch a DENY or provider-wide reset the same way the reactive
             // path's own capture-then-recheck does.
-            onSetPolicy = { tool, action ->
-                withContext(Dispatchers.IO) {
-                    McpToolRegistryImpl.policyEngine.setToolPolicyIfAbsent(
-                        tool.toolName,
-                        action,
-                        expectedRevocation = tool.expectedRevocation,
-                        providerId = tool.providerId,
-                    )
-                }
-            },
+            onSetPolicy = ::saveProactiveToolPolicy,
             onRefreshCandidates = { candidateRefresh++ },
             onDismiss = { showPolicyManager = false },
+            sectionTools =
+                mcpProactivePolicyCandidates(
+                    allTools,
+                    emptyMap(),
+                    disabledToolNames,
+                    McpToolRegistryImpl.policyEngine::revocationVersion,
+                ),
+            onApplySection = { changes ->
+                withContext(Dispatchers.IO) { McpToolRegistryImpl.policyEngine.setSectionPolicies(changes) }
+            },
         )
     }
 }
@@ -450,6 +451,7 @@ internal fun mcpProactivePolicyCandidates(
                 it.providerId,
                 revocationVersion(it.definition.name, it.providerId),
                 it.definition.description,
+                it.definition.readOnly,
             )
         }.sortedBy { it.toolName }
         .toList()
