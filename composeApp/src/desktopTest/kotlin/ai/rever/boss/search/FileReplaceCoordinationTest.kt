@@ -13,6 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * The locking primitive behind BossConsole#622's fix - [ContentSearchService]'s closed-file
@@ -135,6 +136,105 @@ class FileReplaceCoordinationTest {
                 // If the failed transaction had leaked the lock, this would hang.
                 val ran = withTimeoutOrNull(2_000) { FileReplaceCoordination.withFileLock("throw-key") { true } }
                 assertEquals(true, ran, "a thrown block left the lock unreleased")
+            }
+        }
+
+    @Test
+    fun `three callers for one key are admitted in FIFO order`() =
+        runBlocking {
+            withTimeout(5_000) {
+                val order = mutableListOf<String>()
+                val aEntered = CompletableDeferred<Unit>()
+                val releaseA = CompletableDeferred<Unit>()
+                val releaseB = CompletableDeferred<Unit>()
+
+                val a =
+                    async {
+                        FileReplaceCoordination.withFileLock("fifo-key") {
+                            order.add("a-enter")
+                            aEntered.complete(Unit)
+                            releaseA.await()
+                            order.add("a-exit")
+                        }
+                    }
+                aEntered.await()
+
+                // b queues behind a; c queues behind b. Each yield() lets the just-launched
+                // coroutine run up to its own suspension point (on the mutex) before the
+                // next one is created, so the queue order is deterministic, not incidental.
+                val b =
+                    async {
+                        FileReplaceCoordination.withFileLock("fifo-key") {
+                            order.add("b-enter")
+                            releaseB.await()
+                            order.add("b-exit")
+                        }
+                    }
+                yield()
+
+                val c =
+                    async {
+                        FileReplaceCoordination.withFileLock("fifo-key") {
+                            order.add("c-enter")
+                        }
+                    }
+                yield()
+
+                releaseA.complete(Unit)
+                a.await()
+                assertTrue("b-enter" in order, "b did not acquire once a released")
+                assertTrue("c-enter" !in order, "c was admitted before b - not FIFO")
+
+                releaseB.complete(Unit)
+                b.await()
+                c.await()
+
+                assertEquals(listOf("a-enter", "a-exit", "b-enter", "b-exit", "c-enter"), order)
+            }
+        }
+
+    @Test
+    fun `cancelling a queued waiter does not block the caller queued behind it`() =
+        runBlocking {
+            withTimeout(5_000) {
+                val holderEntered = CompletableDeferred<Unit>()
+                val releaseHolder = CompletableDeferred<Unit>()
+                val holder =
+                    launch {
+                        FileReplaceCoordination.withFileLock("waiter-cancel-key") {
+                            holderEntered.complete(Unit)
+                            releaseHolder.await()
+                        }
+                    }
+                holderEntered.await()
+
+                // Queues behind the holder, then is cancelled before it ever acquires.
+                val waiter =
+                    launch {
+                        FileReplaceCoordination.withFileLock("waiter-cancel-key") {
+                            error("must never run: cancelled while still queued")
+                        }
+                    }
+                yield()
+                waiter.cancelAndJoin()
+
+                // Queues behind the now-cancelled waiter.
+                val newcomerEntered = CompletableDeferred<Unit>()
+                val newcomer =
+                    launch {
+                        FileReplaceCoordination.withFileLock("waiter-cancel-key") {
+                            newcomerEntered.complete(Unit)
+                        }
+                    }
+                yield()
+
+                releaseHolder.complete(Unit)
+                holder.join()
+
+                // If the cancelled waiter had corrupted the slot's refcount or left the mutex
+                // thinking a cancelled acquire still holds a place in line, this hangs.
+                newcomerEntered.await()
+                newcomer.join()
             }
         }
 }

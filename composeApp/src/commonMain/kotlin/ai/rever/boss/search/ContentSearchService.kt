@@ -593,10 +593,16 @@ class ContentSearchService(
                 // (BossConsole#622) - not just this call, or this instance's own calls.
                 // Without it, two overlapping replacements each read their own snapshot
                 // and raced to write it back; whichever finished last silently reversed
-                // the other's already-reported-successful edit. Locking on the canonical
-                // path (not the raw one) means the same file reached through two spellings
-                // - a symlinked checkout, /tmp vs /private/tmp - still serializes: the
-                // exact alias case resolveFile documents.
+                // the other's already-reported-successful edit. Locking on the real path
+                // (not the raw one) means the same file reached under two ANCESTOR-
+                // DIRECTORY spellings - a symlinked checkout, /tmp vs /private/tmp, a
+                // Windows junction - still serializes: the exact directory-alias case
+                // resolveFile's own real-path pass exists for. A FILE-level symlink is
+                // NOT covered the same way: writeAtomically replaces the link itself with
+                // a regular file (see its own KDoc), so a caller naming the link and a
+                // caller naming its target still serialize on one key but write two
+                // distinct inodes - this lock cannot make that pre-existing behavior
+                // coherent, only prevent the two callers from racing each other's writes.
                 FileReplaceCoordination.withFileLock(canonicalOrPath(file)) {
                     // UTF-8 in, UTF-8 out. A file in another single-byte encoding has no NUL
                     // bytes, so it passes the binary check, and round-tripping it through
@@ -908,13 +914,31 @@ class ContentSearchService(
 }
 
 /**
- * Canonical path when resolvable, else the absolute one - identity for cycle detection
+ * A file's real path when resolvable, else its canonical path, else its absolute path
+ * normalized (never just returned raw) - identity for cycle detection
  * ([ContentSearchService.walkProjectFiles]) and for cross-instance file-lock keys
  * ([FileReplaceCoordination]). File-scoped rather than a member of [ContentSearchService]
  * so [FileReplaceCoordination] - a process-wide singleton that must not be reset per
  * instance - can compute the same identity without needing one.
+ *
+ * [java.nio.file.Path.toRealPath] rather than [File.getCanonicalPath] as the first choice:
+ * `canonicalPath` does not resolve a Windows directory junction to the directory it points
+ * at (the same reason [ContentSearchService.resolveFile] does its own second, real-path
+ * pass), so two [ContentSearchService] instances rooted at a junction and its target would
+ * otherwise compute two different keys for what is one file on disk. Both require the path
+ * to already exist, which every call site here has just confirmed; the normalized-absolute
+ * fallback exists only for a path that stops existing between that check and this call, and
+ * is normalized (not returned raw) so `a/../a/file` and `a/file` still collapse to one key.
  */
-private fun canonicalOrPath(f: File): String = runCatching { f.canonicalPath }.getOrDefault(f.absolutePath)
+private fun canonicalOrPath(f: File): String =
+    runCatching { f.toPath().toRealPath().toString() }
+        .recoverCatching { f.canonicalPath }
+        .getOrDefault(
+            f.absoluteFile
+                .toPath()
+                .normalize()
+                .toString(),
+        )
 
 /**
  * Serializes the whole read/compute/persist transaction for a given file across every
@@ -934,6 +958,17 @@ private fun canonicalOrPath(f: File): String = runCatching { f.canonicalPath }.g
  *
  * `internal` for direct testing of the locking primitive itself; [ContentSearchService]
  * is the only real caller.
+ *
+ * **Deliberately out of scope, so nobody assumes more than exists:**
+ * - **Other write surfaces.** `FileSystemDataProviderImpl.writeFile` and
+ *   `EditorContentProviderImpl.writeFileContent` are separate ungated plugin-facing writes
+ *   over project files and take no lock here - this coordinates `replaceInProject` against
+ *   itself, not against every way a file in the project can be written.
+ * - **The buffer-vs-disk branch choice, in [ContentSearchService.replaceInOneFile].** Only
+ *   the closed-file branch takes this lock; the decision of which branch to take (a live
+ *   editor buffer probe) happens before it. A tab opening for the file between one caller's
+ *   probe and another caller's disk write is not covered - narrower than the lost-update
+ *   race this exists for, since it needs a tab to open mid-replace, but real.
  */
 internal object FileReplaceCoordination {
     /** A per-key mutex plus how many in-flight transactions currently hold a reference to it. */

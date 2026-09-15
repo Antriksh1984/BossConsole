@@ -1,17 +1,23 @@
 package ai.rever.boss.search
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.nio.file.Files
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -24,6 +30,7 @@ import kotlin.test.assertTrue
  * `node_modules` and `.git`, refused to enter the project root, and every
  * search in the app returned zero results.
  */
+@Suppress("LargeClass")
 class ContentSearchServiceTest {
     private fun tree(root: File) {
         File(root, "top.kt").writeText("val needle = 1\n")
@@ -674,72 +681,186 @@ class ContentSearchServiceTest {
     fun `concurrent dry-run replacements to the same file never write and report correct counts`(
         @TempDir dir: File,
     ) = runBlocking {
-        val file = File(dir, "document.txt")
-        file.writeText("alpha alpha beta\n")
-        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+        withTimeout(5_000) {
+            val file = File(dir, "document.txt")
+            file.writeText("alpha alpha beta\n")
+            val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
 
-        coroutineScope {
-            val a =
-                async {
-                    service.replaceInProject(
-                        query = "alpha",
-                        replacement = "ALPHA",
-                        files = listOf("document.txt"),
-                        dryRun = true,
-                    )
-                }
-            val b =
-                async {
-                    service.replaceInProject(
-                        query = "beta",
-                        replacement = "BETA",
-                        files = listOf("document.txt"),
-                        dryRun = true,
-                    )
-                }
-            assertEquals(2, a.await().totalReplacements)
-            assertEquals(1, b.await().totalReplacements)
+            coroutineScope {
+                val a =
+                    async {
+                        service.replaceInProject(
+                            query = "alpha",
+                            replacement = "ALPHA",
+                            files = listOf("document.txt"),
+                            dryRun = true,
+                        )
+                    }
+                val b =
+                    async {
+                        service.replaceInProject(
+                            query = "beta",
+                            replacement = "BETA",
+                            files = listOf("document.txt"),
+                            dryRun = true,
+                        )
+                    }
+                assertEquals(2, a.await().totalReplacements)
+                assertEquals(1, b.await().totalReplacements)
+            }
+
+            assertEquals(
+                "alpha alpha beta\n",
+                file.readText(),
+                "dry run must never write, even while holding the file lock",
+            )
         }
-
-        assertEquals(
-            "alpha alpha beta\n",
-            file.readText(),
-            "dry run must never write, even while holding the file lock",
-        )
     }
 
     @Test
-    fun `concurrent replacements to independent files both succeed`(
+    fun `replacements to independent files, run together, both land correctly`(
         @TempDir dir: File,
     ) = runBlocking {
-        val a = File(dir, "a.txt").apply { writeText("alpha\n") }
-        val b = File(dir, "b.txt").apply { writeText("beta\n") }
-        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+        // Outcome-only: proves neither file's edit is lost or corrupted when both run
+        // together, but (being outcomes, not timing) would pass just as well under a single
+        // global lock. The real proof that different keys do not wait on each other is
+        // FileReplaceCoordinationTest's "two calls for different keys do not wait on each
+        // other", which observes ordering directly.
+        withTimeout(5_000) {
+            val a = File(dir, "a.txt").apply { writeText("alpha\n") }
+            val b = File(dir, "b.txt").apply { writeText("beta\n") }
+            val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
 
-        coroutineScope {
-            val resultA =
-                async {
+            coroutineScope {
+                val resultA =
+                    async {
+                        service.replaceInProject(
+                            query = "alpha",
+                            replacement = "ALPHA",
+                            files = listOf("a.txt"),
+                            dryRun = false,
+                        )
+                    }
+                val resultB =
+                    async {
+                        service.replaceInProject(
+                            query = "beta",
+                            replacement = "BETA",
+                            files = listOf("b.txt"),
+                            dryRun = false,
+                        )
+                    }
+                assertEquals(1, resultA.await().totalReplacements)
+                assertEquals(1, resultB.await().totalReplacements)
+            }
+
+            assertEquals("ALPHA\n", a.readText())
+            assertEquals("BETA\n", b.readText())
+        }
+    }
+
+    @Test
+    fun `the closed-file replace actually runs inside FileReplaceCoordination's lock`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        // Holds the lock for this file externally (bypassing ContentSearchService entirely)
+        // and proves replaceInProject then blocks on it - the only way to tell "the wrapper
+        // is really there" from "the four concurrent-replace tests happened not to race",
+        // since those are probabilistic (both reads can land before either write on a fast
+        // local disk, most of the time). Deleting the withFileLock wrapper in
+        // ContentSearchService.replaceInOneFile makes this test hang past its own
+        // withTimeoutOrNull and fail - it cannot pass by accident the way the others can.
+        withTimeout(5_000) {
+            val file = File(dir, "document.txt").apply { writeText("alpha\n") }
+            val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+            val held = CompletableDeferred<Unit>()
+            val holder =
+                launch {
+                    FileReplaceCoordination.withFileLock(file.canonicalPath) {
+                        held.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+            held.await()
+
+            val whileHeld =
+                withTimeoutOrNull(500) {
                     service.replaceInProject(
                         query = "alpha",
                         replacement = "ALPHA",
-                        files = listOf("a.txt"),
+                        files = listOf("document.txt"),
                         dryRun = false,
                     )
                 }
-            val resultB =
-                async {
-                    service.replaceInProject(
-                        query = "beta",
-                        replacement = "BETA",
-                        files = listOf("b.txt"),
-                        dryRun = false,
-                    )
-                }
-            assertEquals(1, resultA.await().totalReplacements)
-            assertEquals(1, resultB.await().totalReplacements)
-        }
+            assertNull(whileHeld, "replaceInProject did not wait on the per-file lock")
+            assertEquals("alpha\n", file.readText(), "a write must not have landed while the lock was held")
 
-        assertEquals("ALPHA\n", a.readText())
-        assertEquals("BETA\n", b.readText())
+            holder.cancelAndJoin()
+            val afterRelease =
+                service.replaceInProject(
+                    query = "alpha",
+                    replacement = "ALPHA",
+                    files = listOf("document.txt"),
+                    dryRun = false,
+                )
+            assertEquals(1, afterRelease.totalReplacements)
+            assertEquals("ALPHA\n", file.readText())
+        }
+    }
+
+    @Test
+    fun `two services rooted at a directory and a symlink to it serialize on one key`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        // The directory-alias case FileReplaceCoordination's KDoc actually claims (a
+        // symlinked checkout, /tmp vs /private/tmp): two ContentSearchService instances,
+        // one rooted at the real directory and one at a symlink to it, naming the same file
+        // by two different absolute paths, must still serialize on one lock key.
+        val real = File(dir, "real").apply { mkdirs() }
+        val aliasLink = File(dir, "alias")
+        val canCreateSymlinks =
+            runCatching { Files.createSymbolicLink(aliasLink.toPath(), real.toPath()) }.isSuccess
+        assumeTrue(
+            canCreateSymlinks,
+            "creating a symlink is not permitted on this machine (e.g. Windows without privilege)",
+        )
+
+        withTimeout(5_000) {
+            File(real, "document.txt").writeText("alpha beta\n")
+            val serviceReal = ContentSearchService(projectPathProvider = { real.absolutePath })
+            val serviceAlias = ContentSearchService(projectPathProvider = { aliasLink.absolutePath })
+
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val holder =
+                launch {
+                    FileReplaceCoordination.withFileLock(File(real, "document.txt").canonicalPath) {
+                        entered.complete(Unit)
+                        release.await()
+                    }
+                }
+            entered.await()
+
+            // Both spellings resolve to the SAME canonical key the holder above took, so
+            // both replacements must wait - through either service.
+            val a =
+                async {
+                    withTimeoutOrNull(500) {
+                        serviceReal.replaceInProject("alpha", "ALPHA", listOf("document.txt"), dryRun = false)
+                    }
+                }
+            val b =
+                async {
+                    withTimeoutOrNull(500) {
+                        serviceAlias.replaceInProject("alpha", "ALPHA", listOf("document.txt"), dryRun = false)
+                    }
+                }
+            assertNull(a.await(), "the real-path service did not wait on the alias's lock")
+            assertNull(b.await(), "the alias-path service did not wait on the real path's lock")
+
+            release.complete(Unit)
+            holder.join()
+        }
     }
 }
