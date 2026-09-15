@@ -72,6 +72,8 @@
     // The scroll chain under the first event owns the whole gesture. Keeping the initial path
     // matters when a vertical first delta turns horizontal after the pointer has moved.
     var scrollPath = null;
+    // Retain only the latest event to observe cancellation by later window listeners.
+    var lastWheelEvent = null;
     // Latched the first time this gesture is past COMMIT_PX with enough events to be real.
     //
     // From that point the vertical tiers stop being asked. Vertical is a PATH LENGTH, so it only
@@ -141,10 +143,13 @@
             if (!el || el.nodeType !== 1) {
                 continue;
             }
-            var range = el.scrollWidth - el.clientWidth;
-            if (range <= 1) {
-                continue;
+            // Virtual grids and canvases often scroll a model or a sibling scrollbar instead
+            // of this element. Their wheel gesture belongs to the page even at an edge.
+            var role = typeof el.getAttribute === 'function' ? el.getAttribute('role') : null;
+            if (el.tagName === 'CANVAS' || role === 'grid' || role === 'treegrid') {
+                return true;
             }
+            var range = el.scrollWidth - el.clientWidth;
             var overflowX = '';
             var cssDirection = 'ltr';
             var overscrollX = 'auto';
@@ -155,6 +160,12 @@
                 overscrollX = style.overscrollBehaviorX || 'auto';
             } catch (e2) {
                 overflowX = '';
+            }
+            if (overscrollX === 'contain' || overscrollX === 'none') {
+                return true;
+            }
+            if (range <= 1) {
+                continue;
             }
             // The root needs a special case - it computes `overflow-x: visible` on an ordinary page
             // even though the viewport scrolls - but it must NOT skip the test entirely, which is
@@ -314,6 +325,7 @@
         rejected = false;
         direction = 0;
         scrollPath = null;
+        lastWheelEvent = null;
         reachedCommit = false;
         nativeGestureId = null;
     }
@@ -368,6 +380,9 @@
     //   the direction lost its history entry, or if state went away entirely.
     //
     function decide() {
+        // A page may register a window bubble listener after ours. Its preventDefault is
+        // visible now, after dispatch, even though it was false inside onWheel.
+        if (lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
         if (rejected || direction === 0 || eventCount < MIN_EVENTS || !available(direction)) {
             return;
         }
@@ -416,6 +431,8 @@
         }
         nativeGestureId = activeId;
 
+        if (lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
+        lastWheelEvent = event;
         if (rejected) {
             return;
         }

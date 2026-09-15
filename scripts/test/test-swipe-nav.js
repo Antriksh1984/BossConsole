@@ -99,6 +99,7 @@ function newPage(js, options = {}) {
         children: [],
         parentNode: null,
         setAttribute() {},
+        getAttribute(name) { return this[name] || null; },
         appendChild(child) {
           child.parentNode = this;
           this.children.push(child);
@@ -231,6 +232,7 @@ function newPage(js, options = {}) {
       },
     };
     (listeners.wheel || []).forEach((f) => f(event));
+    if (eventOptions.preventAfterObserver) event.defaultPrevented = true;
   };
 
   return {
@@ -787,6 +789,35 @@ console.log("\nChrome's cancellation tiers (history_swiper.mm)");
   p.swipe(14, -10, 0);
   p.settle();
   eq('and a clean swipe still is not', p.navigated, ['back']);
+}
+
+console.log('\nvirtual spreadsheet ownership');
+for (const props of [{ tagName: 'CANVAS' }, { role: 'grid' }, { role: 'treegrid' }]) {
+  const p = newPage(js);
+  const surface = p.element(props);
+  p.swipe(12, -10, 0, surface);
+  p.settle();
+  eq('virtual surface retains gesture: ' + JSON.stringify(props), p.navigated, []);
+}
+{
+  const p = newPage(js, { root: { overscrollBehaviorX: 'none' } });
+  p.swipe(12, -10);
+  p.settle();
+  eq('root overscroll opt-out without a DOM scroll range', p.navigated, []);
+}
+{
+  const p = newPage(js);
+  p.wheel(-10, 0, undefined, { preventAfterObserver: true });
+  p.swipe(12, -10);
+  p.settle();
+  eq('late page cancellation stays latched through later uncancelled events', p.navigated, []);
+}
+{
+  const p = newPage(js);
+  p.swipe(12, -10);
+  p.wheel(-10, 0, undefined, { preventAfterObserver: true });
+  p.settle();
+  eq('late cancellation of final event prevents release navigation', p.navigated, []);
 }
 
 console.log('\nswitching it off while a page is open');
