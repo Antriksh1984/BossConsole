@@ -10,27 +10,12 @@ import io.grpc.Status
 import io.grpc.StatusException
 
 /**
- * Kernel-side bridge for `SplitViewService`.
+ * Host-side split-view operations for authenticated child processes (BossConsole#53).
  *
- * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
- * helper shape introduced for the Secret Service in PR #505 and since applied to ActiveTabs,
- * Download, Git, Log, PluginUI, ProjectData, RoleManagement, RunConfig and Supabase. Before this
- * bridge checked identity at all, any process able to open a connection to the kernel IPC server -
- * not only the plugins the host itself loaded - could [openUrlInActivePanel] to force the browser
- * to navigate an arbitrary window's active panel to an attacker-chosen URL, with no confirmation
- * of any kind for an ordinary http(s) URL. A `boss://` URL routes through
- * [ai.rever.boss.components.plugin.providers.SplitViewOperationsImpl]'s deep-link dispatch as
- * [ai.rever.boss.utils.DeepLinkOrigin.EXTERNAL] - `boss://terminal` gets that tier's confirmation
- * prompt, but per this repo's own AGENTS.md every other `boss://` host, `boss://plugin?id=…`
- * included, is unchanged by origin and has no confirmation gate at all. The same unauthenticated
- * caller could also
- * [openFileInActivePanel]/[openFileInEditor]/[openFileInBrowser]/[openFileAtPosition] to open an
- * arbitrary file path in the user's editor or browser with no path confinement, or
- * [preserveCurrentState] to overwrite a workspace snapshot under an attacker-chosen name.
- *
- * This closes the last bridge in this PR's own scope. ProjectData's identical fix is in flight
- * separately; once both land, every bridge on the kernel IPC server BossConsole#53 named requires
- * a verified caller identity.
+ * Every unary RPC requires the process identity verified by the kernel's interceptor before
+ * accessing the provider. Implemented mutations log the operation and caller, without exposing
+ * URLs or file paths. This is process authentication, not a per-plugin capability or path policy.
+ * Other kernel services require their own guards; this bridge does not secure the entire server.
  */
 // One method per RPC the generated service base class declares, plus small identity and audit helpers.
 @Suppress("TooManyFunctions")
@@ -95,12 +80,15 @@ class SplitViewServiceBridge(
 
     override suspend fun applyWorkspace(request: SplitViewApplyWorkspaceRequest): Empty {
         authenticatedCallerOrRefuse("applyWorkspace")
+        // Add mutation auditing when this stub gains provider dispatch.
         // Workspace JSON needs to be deserialized on the host side
         // For now, log the request — full implementation depends on LayoutWorkspace serialization
         return Empty.getDefaultInstance()
     }
 
     /**
+     * Unary RPCs only: this identity is a per-call snapshot. Streaming RPCs must revalidate
+     * with `CURRENT_IDENTITY`, as PluginUIServiceBridge.streamUI does.
      * The verified identity, or a thrown `PERMISSION_DENIED` when there is none.
      *
      * Mirrors the helper introduced by PR #505 (BossConsole#53) - fails closed rather than let a

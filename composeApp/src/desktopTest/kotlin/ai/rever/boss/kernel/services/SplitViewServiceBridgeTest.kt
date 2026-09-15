@@ -1,5 +1,6 @@
 package ai.rever.boss.kernel.services
 
+import ai.rever.boss.ipc.BossIpcServer
 import ai.rever.boss.ipc.auth.ProcessIdentityInterceptor
 import ai.rever.boss.ipc.auth.ProcessTokenClientInterceptor
 import ai.rever.boss.ipc.auth.ProcessTokenRegistry
@@ -19,8 +20,12 @@ import ai.rever.boss.plugin.api.TabsComponent
 import ai.rever.boss.plugin.workspace.LayoutWorkspace
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
+import io.grpc.Metadata
 import io.grpc.Server
 import io.grpc.ServerBuilder
+import io.grpc.ServerCall
+import io.grpc.ServerCallHandler
+import io.grpc.ServerInterceptor
 import io.grpc.Status
 import io.grpc.StatusException
 import kotlinx.coroutines.runBlocking
@@ -43,6 +48,7 @@ import kotlin.test.assertTrue
  * `preserveCurrentState`.
  */
 class SplitViewServiceBridgeTest {
+    private val exercisedRpcs = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private lateinit var tokenRegistry: ProcessTokenRegistry
     private lateinit var provider: FakeSplitViewOperations
     private lateinit var server: Server
@@ -59,7 +65,18 @@ class SplitViewServiceBridgeTest {
             ServerBuilder
                 .forPort(0)
                 .intercept(ProcessIdentityInterceptor(tokenRegistry))
-                .addService(SplitViewServiceBridge(provider))
+                .intercept(
+                    object : ServerInterceptor {
+                        override fun <ReqT, RespT> interceptCall(
+                            call: ServerCall<ReqT, RespT>,
+                            headers: Metadata,
+                            next: ServerCallHandler<ReqT, RespT>,
+                        ): ServerCall.Listener<ReqT> {
+                            exercisedRpcs += call.methodDescriptor.fullMethodName
+                            return next.startCall(call, headers)
+                        }
+                    },
+                ).addService(SplitViewServiceBridge(provider))
                 .build()
                 .start()
         authenticatedChannel =
@@ -131,6 +148,15 @@ class SplitViewServiceBridgeTest {
             }
 
             assertTrue(provider.calls.isEmpty(), "a refused call must never reach the provider")
+            assertEquals(
+                SplitViewServiceBridge(provider)
+                    .bindService()
+                    .methods
+                    .map { it.methodDescriptor.fullMethodName }
+                    .toSet(),
+                exercisedRpcs.toSet(),
+                "Every declared RPC must be exercised by the refusal test",
+            )
         }
 
     @Test
@@ -141,6 +167,7 @@ class SplitViewServiceBridgeTest {
                     .newBuilder()
                     .setUrl("https://example.com")
                     .setTitle("t")
+                    .setForceNewTab(true)
                     .build(),
             )
             authenticated.openFileInActivePanel(
@@ -176,11 +203,11 @@ class SplitViewServiceBridgeTest {
 
             assertEquals(
                 listOf(
-                    "openUrlInActivePanel",
-                    "openFileInActivePanel",
-                    "openFileInBrowser",
-                    "openFileInEditor",
-                    "openFileAtPosition",
+                    "openUrlInActivePanel|https://example.com|t|true",
+                    "openFileInActivePanel|/tmp/a|a",
+                    "openFileInBrowser|/tmp/a|a",
+                    "openFileInEditor|/tmp/a|a",
+                    "openFileAtPosition|/tmp/a|a|1|2",
                 ),
                 provider.calls,
             )
@@ -209,7 +236,7 @@ class SplitViewServiceBridgeTest {
             )
 
             assertEquals(
-                listOf("setActivePanel", "preserveCurrentState", "selectTabInPanel"),
+                listOf("setActivePanel|p1", "preserveCurrentState|w1|n", "selectTabInPanel|t1|p1"),
                 provider.calls,
             )
         }
@@ -222,6 +249,28 @@ class SplitViewServiceBridgeTest {
                 authenticated.setActivePanel(SplitViewPanelIdRequest.newBuilder().setPanelId("p1").build())
             }
             assertTrue(provider.calls.isEmpty())
+        }
+
+    @Test
+    fun `late registered production bridge rejects anonymous and accepts authenticated calls`() =
+        runBlocking {
+            val lateServer = BossIpcServer("tcp://localhost:0", tokenRegistry).start()
+            val channel = ManagedChannelBuilder.forAddress("localhost", lateServer.port).usePlaintext().build()
+            try {
+                lateServer.addService(SplitViewServiceBridge(provider))
+                val stub = SplitViewServiceGrpcKt.SplitViewServiceCoroutineStub(channel)
+                val request = SplitViewPanelIdRequest.newBuilder().setPanelId("late-panel").build()
+                assertRefused { stub.setActivePanel(request) }
+                assertTrue(provider.calls.isEmpty())
+                stub
+                    .withInterceptors(ProcessTokenClientInterceptor(tokenRegistry.issue("late-caller")))
+                    .setActivePanel(request)
+                assertEquals(listOf("setActivePanel|late-panel"), provider.calls)
+            } finally {
+                channel.shutdownNow()
+                channel.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                lateServer.stop(SHUTDOWN_TIMEOUT_MS)
+            }
         }
 
     private suspend fun assertRefused(call: suspend () -> Unit) {
@@ -238,28 +287,28 @@ class SplitViewServiceBridgeTest {
             title: String,
             forceNewTab: Boolean,
         ) {
-            calls += "openUrlInActivePanel"
+            calls += "openUrlInActivePanel|$url|$title|$forceNewTab"
         }
 
         override fun openFileInActivePanel(
             filePath: String,
             fileName: String,
         ) {
-            calls += "openFileInActivePanel"
+            calls += "openFileInActivePanel|$filePath|$fileName"
         }
 
         override fun openFileInBrowser(
             filePath: String,
             fileName: String,
         ) {
-            calls += "openFileInBrowser"
+            calls += "openFileInBrowser|$filePath|$fileName"
         }
 
         override fun openFileInEditor(
             filePath: String,
             fileName: String,
         ) {
-            calls += "openFileInEditor"
+            calls += "openFileInEditor|$filePath|$fileName"
         }
 
         override fun openFileAtPosition(
@@ -268,18 +317,18 @@ class SplitViewServiceBridgeTest {
             line: Int,
             column: Int,
         ) {
-            calls += "openFileAtPosition"
+            calls += "openFileAtPosition|$filePath|$fileName|$line|$column"
         }
 
         override fun setActivePanel(panelId: String) {
-            calls += "setActivePanel"
+            calls += "setActivePanel|$panelId"
         }
 
         override fun preserveCurrentState(
             workspaceId: String,
             workspaceName: String,
         ) {
-            calls += "preserveCurrentState"
+            calls += "preserveCurrentState|$workspaceId|$workspaceName"
         }
 
         override fun getActiveTabsComponent(): TabsComponent? = null
@@ -290,7 +339,7 @@ class SplitViewServiceBridgeTest {
             tabId: String,
             panelId: String,
         ) {
-            calls += "selectTabInPanel"
+            calls += "selectTabInPanel|$tabId|$panelId"
         }
 
         override fun openTab(tabInfo: TabInfo) = Unit
