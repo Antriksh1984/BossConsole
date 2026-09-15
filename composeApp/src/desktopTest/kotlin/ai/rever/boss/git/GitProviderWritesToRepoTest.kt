@@ -463,6 +463,112 @@ class GitProviderWritesToRepoTest {
     }
 
     @Test
+    fun stashHonoursItsProjectPathOverrideEvenWhenTheGlobalPointsAtAnotherRepo(
+        @TempDir tmpA: File,
+        @TempDir tmpB: File,
+    ) = runTest {
+        // BossConsole#699: GitService.stash() used to read only the process-global
+        // currentProjectPath, so window A's "Stash Changes" click could stash window B's
+        // working tree if B's own refresh had aligned the global last. Same round-4 shape
+        // as discardChanges above, pinned for stash specifically.
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val repoA = repo(tmpA)
+            val repoB = repo(tmpB)
+            File(repoA, "tracked.txt").writeText("A-dirty\n")
+            File(repoB, "tracked.txt").writeText("B-dirty\n")
+            GitService.alignCurrentProjectPath(repoB.absolutePath)
+
+            val result = GitService.stash(projectPathOverride = repoA.absolutePath)
+
+            assertTrue(result is ai.rever.boss.plugin.git.GitOperationResult.Success, "stash reported $result")
+            assertEquals("one\n", File(repoA, "tracked.txt").readText(), "A's change was not stashed")
+            assertEquals(
+                "B-dirty\n",
+                File(repoB, "tracked.txt").readText(),
+                "the stash leaked into the repo the GLOBAL pointed at",
+            )
+            assertTrue(git(repoA, "stash", "list").isNotBlank(), "A should have a stash")
+            assertTrue(git(repoB, "stash", "list").isBlank(), "B must not have gained a stash from A's request")
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
+    fun stashPopHonoursItsProjectPathOverrideEvenWhenTheGlobalPointsAtAnotherRepo(
+        @TempDir tmpA: File,
+        @TempDir tmpB: File,
+    ) = runTest {
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val repoA = repo(tmpA)
+            val repoB = repo(tmpB)
+            File(repoA, "tracked.txt").writeText("A-two\n")
+            git(repoA, "stash", "push")
+            File(repoB, "tracked.txt").writeText("B-two\n")
+            git(repoB, "stash", "push")
+            GitService.alignCurrentProjectPath(repoB.absolutePath)
+
+            val result = GitService.stashPop(index = 0, projectPathOverride = repoA.absolutePath)
+
+            assertTrue(result is ai.rever.boss.plugin.git.GitOperationResult.Success, "stash pop reported $result")
+            assertEquals("A-two\n", File(repoA, "tracked.txt").readText(), "A's stash was not popped")
+            assertTrue(git(repoA, "stash", "list").isBlank(), "A should have no stashes left")
+            assertEquals(
+                "one\n",
+                File(repoB, "tracked.txt").readText(),
+                "B's working tree was popped by A's request",
+            )
+            assertTrue(git(repoB, "stash", "list").isNotBlank(), "B's stash was consumed by A's pop")
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
+    fun refreshStashListForWindowUpdatesOnlyTheRequestedWindowsState(
+        @TempDir tmpA: File,
+        @TempDir tmpB: File,
+    ) = runTest {
+        // The other half of #699: onStash/onStashPop's success refresh used to re-read the
+        // global stashList (which nothing in the window-scoped UI observes) rather than the
+        // invoking window's own state, so a window's stash menu never picked up the change
+        // it had just made.
+        val globalBefore = GitService.getCurrentProjectPath()
+        try {
+            val repoA = repo(tmpA)
+            val repoB = repo(tmpB)
+            File(repoA, "tracked.txt").writeText("A-two\n")
+            git(repoA, "stash", "push")
+
+            val windowA = WindowGitState("a")
+            val windowB = WindowGitState("b")
+            GitService.refreshForWindow(repoA.absolutePath, windowA)
+            GitService.refreshForWindow(repoB.absolutePath, windowB)
+
+            GitService.refreshStashListForWindow(windowA)
+
+            assertEquals(1, windowA.stashList.value.size, "A's window must show its own stash")
+            assertTrue(windowB.stashList.value.isEmpty(), "B's window state must not be touched by A's refresh")
+        } finally {
+            if (globalBefore == null) {
+                GitService.clearCurrentProjectPathForTests()
+            } else {
+                GitService.alignCurrentProjectPath(globalBefore)
+            }
+        }
+    }
+
+    @Test
     fun anUnsafeRefIsRefusedByEveryRefTakingVerb(
         @TempDir tmp: File,
     ) = runTest {

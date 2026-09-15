@@ -901,10 +901,11 @@ actual object GitService {
     actual suspend fun stash(
         message: String?,
         includeUntracked: Boolean,
+        projectPathOverride: String?,
     ): GitOperationResult =
         withContext(Dispatchers.IO) {
             val projectPath =
-                currentProjectPath
+                projectPathOverride ?: currentProjectPath
                     ?: return@withContext GitError("No project selected")
 
             _isLoading.value = true
@@ -920,8 +921,8 @@ actual object GitService {
 
                 val result = runGitCommand(projectPath, *args.toTypedArray())
                 if (result.exitCode == 0) {
-                    getStatus()
-                    refreshStashList()
+                    getStatus(projectPathOverride = projectPath)
+                    refreshStashList(projectPathOverride = projectPath)
                     GitSuccess(result.output.trim().ifEmpty { "Stashed changes" })
                 } else {
                     val errorMsg = result.error.ifEmpty { result.output }.trim()
@@ -933,18 +934,21 @@ actual object GitService {
             }
         }
 
-    actual suspend fun stashPop(index: Int): GitOperationResult =
+    actual suspend fun stashPop(
+        index: Int,
+        projectPathOverride: String?,
+    ): GitOperationResult =
         withContext(Dispatchers.IO) {
             val projectPath =
-                currentProjectPath
+                projectPathOverride ?: currentProjectPath
                     ?: return@withContext GitError("No project selected")
 
             _isLoading.value = true
             try {
                 val result = runGitCommand(projectPath, "stash", "pop", "stash@{$index}")
                 if (result.exitCode == 0) {
-                    getStatus()
-                    refreshStashList()
+                    getStatus(projectPathOverride = projectPath)
+                    refreshStashList(projectPathOverride = projectPath)
                     GitSuccess("Popped stash@{$index}")
                 } else {
                     val errorMsg = result.error.ifEmpty { result.output }.trim()
@@ -1000,9 +1004,9 @@ actual object GitService {
             }
         }
 
-    actual suspend fun refreshStashList(): List<GitStashInfo> =
+    actual suspend fun refreshStashList(projectPathOverride: String?): List<GitStashInfo> =
         withContext(Dispatchers.IO) {
-            val projectPath = currentProjectPath ?: return@withContext emptyList()
+            val projectPath = projectPathOverride ?: currentProjectPath ?: return@withContext emptyList()
 
             try {
                 // Format: stash@{0}: On branch: message
