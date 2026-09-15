@@ -152,7 +152,7 @@ class McpPolicyEngineAddOnlyIfAbsentTest {
         val generation = engine.revocationVersion("run_command", "provider")
         engine.setProviderPolicy("provider", McpPolicyAction.DENY)
         assertEquals(
-            McpProactivePolicyOutcome.Refused,
+            McpProactivePolicyOutcome.Denied,
             engine.setToolPolicyIfAbsent("run_command", McpPolicyAction.ALLOW, generation, "provider"),
         )
         assertNull(engine.config.value.rules["run_command"])
@@ -167,7 +167,7 @@ class McpPolicyEngineAddOnlyIfAbsentTest {
         val engine = McpPolicyEngine(policyFile = file)
         for (action in listOf(McpPolicyAction.ALLOW, McpPolicyAction.DENY)) {
             assertEquals(
-                McpProactivePolicyOutcome.Refused,
+                McpProactivePolicyOutcome.PolicyUnreadable,
                 engine.setToolPolicyIfAbsent("run_command", action, engine.revocationVersion("run_command")),
             )
             assertEquals("broken policy", file.readText())

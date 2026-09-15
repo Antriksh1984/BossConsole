@@ -56,6 +56,10 @@ sealed interface McpProactivePolicyOutcome {
     /** The candidate is stale, a rule exists, or an effective DENY/fault blocks the write. */
     data object Refused : McpProactivePolicyOutcome
 
+    data object PolicyUnreadable : McpProactivePolicyOutcome
+
+    data object Denied : McpProactivePolicyOutcome
+
     data class Failed(
         val error: String,
     ) : McpProactivePolicyOutcome
@@ -308,10 +312,14 @@ class McpPolicyEngine(
         providerId: String? = null,
     ): McpProactivePolicyOutcome =
         synchronized(lock) {
-            if (revocationVersion(toolName, providerId) != expectedRevocation ||
-                toolName in _config.value.rules || policyFor(toolName, providerId) == McpPolicyAction.DENY
-            ) {
+            if (_fault.value is McpPolicyFault.PersistedPolicyUnreadable) {
+                return@synchronized McpProactivePolicyOutcome.PolicyUnreadable
+            }
+            if (revocationVersion(toolName, providerId) != expectedRevocation || toolName in _config.value.rules) {
                 return@synchronized McpProactivePolicyOutcome.Refused
+            }
+            if (policyFor(toolName, providerId) == McpPolicyAction.DENY) {
+                return@synchronized McpProactivePolicyOutcome.Denied
             }
             writeConfig(
                 key = toolName,

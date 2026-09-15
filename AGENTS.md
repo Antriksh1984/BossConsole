@@ -2101,6 +2101,7 @@ re-checks `toolName !in rules` under the same lock the write itself takes, atomi
 any rule present at write time - not only a DENY - refuses the write instead. The same
 lock also refuses provider DENY and unreadable-policy faults, preserving damaged files
 for manual recovery. Refused writes refresh candidates and require a fresh confirmation;
-storage failures get separate feedback. Confirmation is tied to the full candidate snapshot.
+storage failures get separate feedback. Stable DENY and damaged-file refusals are explained
+inside the dialog, including backup/recovery guidance. Confirmation is tied to the full candidate snapshot.
 These privileged writes remain beside host policy enforcement. #416 tracks the separate
 observation/plugin architecture; this PR does not expose a policy writer to plugins.

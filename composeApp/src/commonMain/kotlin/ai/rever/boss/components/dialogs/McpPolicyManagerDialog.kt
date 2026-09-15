@@ -1,5 +1,6 @@
 package ai.rever.boss.components.dialogs
 
+import ai.rever.boss.mcp.McpMutatingToolCatalog
 import ai.rever.boss.mcp.McpPolicyAction
 import ai.rever.boss.mcp.McpProactivePolicyOutcome
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -78,12 +80,11 @@ fun McpPolicyManagerDialog(
     onRefreshCandidates: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val windowHeight =
-        with(LocalDensity.current) {
-            LocalWindowInfo.current.containerSize.height
-                .toDp()
-        }
-    val maxHeight = (windowHeight - 32.dp).coerceAtLeast(1.dp)
+    val windowSize = LocalWindowInfo.current.containerSize
+    val windowHeight = with(LocalDensity.current) { windowSize.height.toDp() }
+    val windowWidth = with(LocalDensity.current) { windowSize.width.toDp() }
+    val maxHeight = if (windowHeight > 0.dp) (windowHeight - 32.dp).coerceAtLeast(1.dp) else 700.dp
+    val maxWidth = if (windowWidth > 0.dp) (windowWidth - 32.dp).coerceAtLeast(1.dp) else 480.dp
     val colors = BossTheme.colors
     val radii = BossTheme.radius
     val scope = rememberCoroutineScope()
@@ -103,7 +104,7 @@ fun McpPolicyManagerDialog(
         properties = DialogProperties(),
     ) {
         Surface(
-            modifier = Modifier.width(480.dp).heightIn(max = maxHeight),
+            modifier = Modifier.widthIn(max = maxWidth).width(480.dp).heightIn(max = maxHeight),
             shape = RoundedCornerShape(radii.dialog),
             color = colors.panel,
         ) {
@@ -271,6 +272,7 @@ private fun ProactivePolicySectionContent(
     colors: BossColorScheme,
 ) {
     val scope = rememberCoroutineScope()
+    // Like revoke feedback, retain only the latest attempted row outcome.
     var failedSet by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Allow raises standing privilege strictly further than anything else in this dialog can -
     // ASK-forever into unattended ALLOW for every future agent and argument set - so it gets the
@@ -371,6 +373,9 @@ private fun ProactiveAllowConfirmation(
     colors: BossColorScheme,
 ) {
     val risk = remember(toolName) { DefaultMcpRiskEvaluator().evaluateRisk(toolName, McpToolArgs(emptyMap())) }
+    if (McpMutatingToolCatalog.isMutating(toolName)) {
+        Text("This tool performs mutations or external execution.", fontSize = 10.sp, color = colors.alert)
+    }
     Text(
         text = "${risk.level}: ${risk.reason}",
         fontSize = 10.sp,
@@ -393,7 +398,15 @@ internal fun McpProactivePolicyOutcome.proactivePolicyMessage(): String? =
         }
 
         McpProactivePolicyOutcome.Refused -> {
-            "Policy changed or is blocked. Candidates refreshed; review the current policy before trying again."
+            "Policy changed. Candidates refreshed; review the current policy before trying again."
+        }
+
+        McpProactivePolicyOutcome.PolicyUnreadable -> {
+            "Policy file unreadable: all tools are withheld. Preserve a backup, repair the file, and restart BOSS."
+        }
+
+        McpProactivePolicyOutcome.Denied -> {
+            "Current policy already denies this tool. Review the provider policy or defaults before adding a rule."
         }
 
         is McpProactivePolicyOutcome.Failed -> {

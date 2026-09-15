@@ -63,6 +63,7 @@ class McpProactivePolicyDialogTest {
 
     private fun show(
         light: Boolean = false,
+        windowSize: IntSize = IntSize(700, 360),
         content: @Composable () -> Unit,
     ) {
         captureTheme = if (light) "light" else "dark"
@@ -74,10 +75,11 @@ class McpProactivePolicyDialogTest {
                 LocalWindowInfo provides
                     object : WindowInfo {
                         override val isWindowFocused = true
-                        override val containerSize = IntSize(700, 360)
+                        override val containerSize = windowSize
                     },
             ) {
-                Box(Modifier.size(700.dp, 360.dp).clipToBounds()) { content() }
+                val width = (if (windowSize.width > 0) windowSize.width else 700).dp
+                Box(Modifier.size(width, 360.dp).clipToBounds()) { content() }
             }
         }
         rule.mainClock.advanceTimeBy(250)
@@ -86,6 +88,13 @@ class McpProactivePolicyDialogTest {
     private var captureIndex = 0
 
     private fun closeIsInsideWindow() {
+        if (System.getenv("BOSS_REVIEW_CAPTURE") == "1") captureLayout()
+        rule.onNodeWithText("Close").assertIsDisplayed()
+        val bounds = rule.onNodeWithText("Close").getUnclippedBoundsInRoot()
+        assertTrue(bounds.top >= 0.dp && bounds.bottom <= 360.dp, "Close bounds: $bounds")
+    }
+
+    private fun captureLayout() {
         val pixels = rule.onRoot().captureToImage().toPixelMap()
         val image = BufferedImage(pixels.width, pixels.height, BufferedImage.TYPE_INT_ARGB)
         for (y in 0 until pixels.height) for (x in 0 until pixels.width) image.setRGB(x, y, pixels[x, y].toArgb())
@@ -93,10 +102,6 @@ class McpProactivePolicyDialogTest {
         val output = File("build/reports/mcp-review", name)
         output.parentFile.mkdirs()
         javax.imageio.ImageIO.write(image, "png", output)
-
-        rule.onNodeWithText("Close").assertIsDisplayed()
-        val bounds = rule.onNodeWithText("Close").getUnclippedBoundsInRoot()
-        assertTrue(bounds.top >= 0.dp && bounds.bottom <= 360.dp, "Close bounds: $bounds")
     }
 
     @Test fun `short window keeps close visible with saved and proactive rows`() {
@@ -156,8 +161,53 @@ class McpProactivePolicyDialogTest {
             )
         }
         rule.onNodeWithText("Deny", substring = false).performScrollTo().performClick()
-        rule.onNodeWithText("Policy changed or is blocked.", substring = true).assertExists()
+        rule.onNodeWithText("Policy changed.", substring = true).assertExists()
         rule.runOnIdle { assertEquals(1, refreshes) }
         assertTrue(McpProactivePolicyOutcome.Failed("disk").proactivePolicyMessage()!!.contains("storage"))
+    }
+
+    @Test fun `unreadable policy explains recovery inside the modal`() {
+        show {
+            McpPolicyManagerDialog(
+                emptyMap(),
+                listOf(McpToolIdentity("tool", "provider", 0)),
+                { true },
+                { _, _ -> McpProactivePolicyOutcome.PolicyUnreadable },
+                {},
+                {},
+            )
+        }
+        rule.onNodeWithText("Deny", substring = false).performScrollTo().performClick()
+        rule.onNodeWithText("Policy file unreadable:", substring = true).performScrollTo().assertIsDisplayed()
+        assertTrue(McpProactivePolicyOutcome.Denied.proactivePolicyMessage()!!.contains("already denies"))
+    }
+
+    @Test fun `unknown window size retains a usable dialog`() {
+        show(windowSize = IntSize.Zero) {
+            McpPolicyManagerDialog(
+                emptyMap(),
+                emptyList(),
+                { true },
+                { _, _ -> McpProactivePolicyOutcome.Saved },
+                {},
+                {},
+            )
+        }
+        closeIsInsideWindow()
+    }
+
+    @Test fun `narrow window keeps close horizontally inside the viewport`() {
+        show(windowSize = IntSize(360, 360)) {
+            McpPolicyManagerDialog(
+                emptyMap(),
+                emptyList(),
+                { true },
+                { _, _ -> McpProactivePolicyOutcome.Saved },
+                {},
+                {},
+            )
+        }
+        closeIsInsideWindow()
+        assertTrue(rule.onNodeWithText("Close").getUnclippedBoundsInRoot().right <= 360.dp)
     }
 }
