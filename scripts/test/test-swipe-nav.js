@@ -156,6 +156,7 @@ function newPage(js, options = {}) {
   };
   const shadowRoots = [];
   sandbox.window = {
+    location: options.location,
     performance: { timeOrigin: 0 },
     addEventListener: add,
     setTimeout: sandbox.setTimeout,
@@ -231,7 +232,10 @@ function newPage(js, options = {}) {
         preventedDefaults++;
       },
     };
-    (listeners.wheel || []).forEach((f) => f(event));
+    (listeners.wheel || []).forEach((f) => {
+      f(event);
+      if (f === (listeners.wheel || [])[0] && eventOptions.afterCapture) eventOptions.afterCapture();
+    });
     if (eventOptions.preventAfterObserver) event.defaultPrevented = true;
   };
 
@@ -342,8 +346,8 @@ console.log(
 console.log('\nwiring');
 {
   const p = newPage(js);
-  check('installs exactly one wheel listener', p.installed() === 1, p.installed());
-  const wheelReg = p.registrations.find((r) => r.type === 'wheel');
+  check('installs capture snapshot and bubble observer once', p.installed() === 2, p.installed());
+  const wheelReg = p.registrations.find((r) => r.type === 'wheel' && r.opts.capture === false);
   eq('listens in bubble phase and passive', wheelReg.opts, { capture: false, passive: true });
   check(
     'script names the host bridge property',
@@ -789,6 +793,33 @@ console.log("\nChrome's cancellation tiers (history_swiper.mm)");
   p.swipe(14, -10, 0);
   p.settle();
   eq('and a clean swipe still is not', p.navigated, ['back']);
+}
+
+console.log('\nGoogle Sheets boundary adapter');
+for (const [left, dx, want] of [[0,-10,['back']],[0,10,[]],[100,-10,[]],[100,10,[]],[200,10,['forward']],[200,-10,[]]]) {
+  const p = newPage(js, { location: { hostname:'docs.google.com', pathname:'/spreadsheets/d/test/edit' } });
+  const bar = p.element({ clientWidth:100, scrollWidth:300, scrollLeft:left });
+  const grid = { querySelector: () => bar };
+  const canvas = p.element({ tagName:'CANVAS', closest: () => grid });
+  for (let i=0;i<12;i++) p.wheel(dx,0,canvas,{defaultPrevented:true});
+  p.settle();
+  eq('Sheets starts at '+left+' delta '+dx, p.navigated, want);
+}
+{
+  const p = newPage(js, { location: { hostname:'docs.google.com', pathname:'/spreadsheets/d/test/edit' } });
+  const bar = p.element({ clientWidth:100, scrollWidth:300, scrollLeft:10 });
+  const canvas = p.element({ tagName:'CANVAS', closest: () => ({querySelector:()=>bar}) });
+  p.wheel(-10,0,canvas,{afterCapture:()=>{bar.scrollLeft=0;},defaultPrevented:true});
+  p.swipe(12,-10,0,canvas);p.settle();
+  eq('Sheets reaching edge during first event remains page-owned',p.navigated,[]);
+  p.newGesture();p.swipe(12,-10,0,canvas);p.settle();
+  eq('Sheets next outward contact at edge navigates',p.navigated,['back']);
+}
+{
+  const p = newPage(js, { location: { hostname:'other.example', pathname:'/spreadsheets/d/test/edit' } });
+  const canvas=p.element({tagName:'CANVAS',closest:()=>({querySelector:()=>p.element({clientWidth:100,scrollWidth:300})})});
+  p.swipe(12,-10,0,canvas);p.settle();
+  eq('Sheets adapter does not override another origin',p.navigated,[]);
 }
 
 console.log('\nvirtual spreadsheet ownership');

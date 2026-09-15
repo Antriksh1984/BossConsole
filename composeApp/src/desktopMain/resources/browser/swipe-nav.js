@@ -74,6 +74,10 @@
     var scrollPath = null;
     // Retain only the latest event to observe cancellation by later window listeners.
     var lastWheelEvent = null;
+    var sheetBoundary = null;
+    var sheetEdgeNavigation = false;
+    var capturedWheel = null;
+    var capturedSheetBoundary = null;
     // Latched the first time this gesture is past COMMIT_PX with enough events to be real.
     //
     // From that point the vertical tiers stop being asked. Vertical is a PATH LENGTH, so it only
@@ -133,6 +137,32 @@
             path = path.concat([scroller]);
         }
         return path;
+    }
+
+    // Sheets renders cells on a canvas, with a sibling native scrollbar. Read only geometry,
+    // never cells. Its document overscroll policy and cancelled wheels also cover the canvas
+    // at its boundary, so this explicit adapter allows a NEW outward gesture there.
+    function sheetsBoundary(path) {
+        if (!w.location || w.location.hostname !== 'docs.google.com' ||
+            w.location.pathname.indexOf('/spreadsheets/') !== 0) return null;
+        for (var i = 0; i < path.length; i++) {
+            var el = path[i];
+            if (!el || typeof el.closest !== 'function') continue;
+            var grid = el.closest('.grid-container');
+            if (!grid) continue;
+            var bar = grid.querySelector('.native-scrollbar-x');
+            if (!bar || bar.clientWidth <= 0 || bar.scrollWidth < bar.clientWidth) return null;
+            var style = w.getComputedStyle(bar);
+            return { left: bar.scrollLeft, range: bar.scrollWidth - bar.clientWidth,
+                rtl: style.direction === 'rtl' };
+        }
+        return null;
+    }
+
+    function sheetCanScroll(boundary, dir) {
+        return boundary.rtl
+            ? (dir < 0 ? boundary.left > -boundary.range + 1 : boundary.left < -1)
+            : (dir < 0 ? boundary.left > 1 : boundary.left < boundary.range - 1);
     }
 
     function chainCanScroll(path, dir) {
@@ -326,6 +356,8 @@
         direction = 0;
         scrollPath = null;
         lastWheelEvent = null;
+        sheetBoundary = null;
+        sheetEdgeNavigation = false;
         reachedCommit = false;
         nativeGestureId = null;
     }
@@ -382,7 +414,7 @@
     function decide() {
         // A page may register a window bubble listener after ours. Its preventDefault is
         // visible now, after dispatch, even though it was false inside onWheel.
-        if (lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
+        if (!sheetBoundary && lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
         if (rejected || direction === 0 || eventCount < MIN_EVENTS || !available(direction)) {
             return;
         }
@@ -431,19 +463,21 @@
         }
         nativeGestureId = activeId;
 
-        if (lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
+        if (!scrollPath) {
+            scrollPath = eventPath(event);
+            sheetBoundary = capturedWheel === event ? capturedSheetBoundary : sheetsBoundary(scrollPath);
+        }
+
+        if (!sheetBoundary && lastWheelEvent && lastWheelEvent.defaultPrevented) abandon();
         lastWheelEvent = event;
         if (rejected) {
             return;
         }
         // Run in bubble phase so a page widget gets the first chance to claim a synthetic or
         // JavaScript-driven horizontal scroller with preventDefault().
-        if (event.defaultPrevented) {
+        if (event.defaultPrevented && !sheetBoundary) {
             abandon();
             return;
-        }
-        if (!scrollPath) {
-            scrollPath = eventPath(event);
         }
         var dx = event.deltaX || 0;
         var dy = event.deltaY || 0;
@@ -482,7 +516,8 @@
             direction = dir;
             // Decided once per gesture and latched, both of these: which way it goes, and
             // whether the page wanted the scroll for itself.
-            if (chainCanScroll(scrollPath, dir) || !available(dir)) {
+            sheetEdgeNavigation = sheetBoundary !== null && !sheetCanScroll(sheetBoundary, dir);
+            if ((sheetBoundary ? !sheetEdgeNavigation : chainCanScroll(scrollPath, dir)) || !available(dir)) {
                 abandon();
                 return;
             }
@@ -531,6 +566,10 @@
 
     // Bubble phase lets target/page handlers claim custom scrollers with preventDefault first;
     // passive keeps this observer off Chromium's scroll-blocking path.
+    w.addEventListener('wheel', function (event) {
+        capturedWheel = event;
+        capturedSheetBoundary = switchedOff() || event.deltaMode !== 0 ? null : sheetsBoundary(eventPath(event));
+    }, { capture: true, passive: true });
     w.addEventListener('wheel', onWheel, { capture: false, passive: true });
     // pagehide is NOT routed through decide() - the page is already unloading, so navigating
     // it anywhere is moot at best; this only tears down the affordance so nothing outlives the
