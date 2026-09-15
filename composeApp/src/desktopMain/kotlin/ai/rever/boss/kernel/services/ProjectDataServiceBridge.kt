@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
  *
  * **Every call requires a verified caller identity (BossConsole#53)**, the same requirement and
  * helper shape introduced for the Secret Service in PR #505 and since applied to ActiveTabs,
- * Download, Git, Log, PluginUI, RoleManagement, RunConfig and Supabase. Before this bridge checked
+ * Download, Git, Log, PluginUI, RoleManagement and Supabase. Before this bridge checked
  * identity at all, any process able to open a connection to the kernel IPC server - not only the
  * plugins the host itself loaded - could [watchRecentProjects] to see every recently opened
  * project's path (which routinely contains a username, per this repo's own AGENTS.md), and could
@@ -31,8 +31,7 @@ import kotlinx.coroutines.withContext
  * telemetry" section), so an unauthenticated caller could trigger that broadcast on demand and
  * hand every plugin a filesystem path it never asked to see.
  *
- * SplitView still exposes unguarded operations on the same server; BossConsole#53 tracks the
- * remaining IPC surface.
+ * BossConsole#53 tracks the remaining unguarded services on this server.
  */
 class ProjectDataServiceBridge(
     private val provider: ProjectDataProvider,
@@ -44,6 +43,8 @@ class ProjectDataServiceBridge(
      * (`ProjectDataProviderImpl`) that stops updating once its owning window disposes it
      * (BossConsole#520); a KERNEL client watching it would freeze at whatever it last saw. This
      * stream has no such owner to outlive, so it keeps working across every window's lifecycle.
+     * Revocation is checked before each emission; idle streams are not proactively disconnected,
+     * and snapshots already delivered to a caller cannot be recalled.
      */
     override fun watchRecentProjects(request: Empty): Flow<ProjectListResponse> {
         // Capture the gRPC context before returning the asynchronously collected flow - the same

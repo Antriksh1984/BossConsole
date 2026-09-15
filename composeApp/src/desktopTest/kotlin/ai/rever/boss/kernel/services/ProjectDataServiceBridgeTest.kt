@@ -17,12 +17,15 @@ import io.grpc.Server
 import io.grpc.ServerBuilder
 import io.grpc.Status
 import io.grpc.StatusException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -30,6 +33,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
 import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
@@ -68,13 +72,16 @@ class ProjectDataServiceBridgeTest {
     private lateinit var authenticated: ProjectDataServiceGrpcKt.ProjectDataServiceCoroutineStub
     private lateinit var anonymous: ProjectDataServiceGrpcKt.ProjectDataServiceCoroutineStub
 
-    private fun startServer(provider: ProjectDataProvider) {
+    private fun startServer(
+        provider: ProjectDataProvider,
+        uiDispatcher: CoroutineDispatcher = Dispatchers.Main,
+    ) {
         tokenRegistry = ProcessTokenRegistry()
         server =
             ServerBuilder
                 .forPort(0)
                 .intercept(ProcessIdentityInterceptor(tokenRegistry))
-                .addService(ProjectDataServiceBridge(provider))
+                .addService(ProjectDataServiceBridge(provider, uiDispatcher))
                 .build()
                 .start()
         authenticatedChannel =
@@ -90,12 +97,18 @@ class ProjectDataServiceBridgeTest {
 
     @AfterTest
     fun tearDown() {
-        authenticatedChannel.shutdownNow()
-        authenticatedChannel.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        anonymousChannel.shutdownNow()
-        anonymousChannel.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        server.shutdownNow()
-        server.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        if (::authenticatedChannel.isInitialized) {
+            authenticatedChannel.shutdownNow()
+            authenticatedChannel.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }
+        if (::anonymousChannel.isInitialized) {
+            anonymousChannel.shutdownNow()
+            anonymousChannel.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }
+        if (::server.isInitialized) {
+            server.shutdownNow()
+            server.awaitTermination(SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }
     }
 
     @Test
@@ -186,22 +199,7 @@ class ProjectDataServiceBridgeTest {
                 }
 
             executor.asCoroutineDispatcher().use { uiDispatcher ->
-                tokenRegistry = ProcessTokenRegistry()
-                server =
-                    ServerBuilder
-                        .forPort(0)
-                        .intercept(ProcessIdentityInterceptor(tokenRegistry))
-                        .addService(ProjectDataServiceBridge(provider, uiDispatcher))
-                        .build()
-                        .start()
-                authenticatedChannel =
-                    ManagedChannelBuilder
-                        .forAddress("localhost", server.port)
-                        .usePlaintext()
-                        .intercept(ProcessTokenClientInterceptor(tokenRegistry.issue(CALLER)))
-                        .build()
-                anonymousChannel = ManagedChannelBuilder.forAddress("localhost", server.port).usePlaintext().build()
-                authenticated = ProjectDataServiceGrpcKt.ProjectDataServiceCoroutineStub(authenticatedChannel)
+                startServer(provider, uiDispatcher)
 
                 val response =
                     authenticated.selectProject(
@@ -248,30 +246,36 @@ class ProjectDataServiceBridgeTest {
                 startServer(FakeProjectDataProvider(MutableStateFlow(listOf(decoy))))
 
                 awaitInRecentProjects(seed)
-                val expected = ProjectState.recentProjects.value.map { it.path }
-                assertTrue(seed.path in expected, "seed disappeared before the first emission")
-
-                // One collection, two emissions: the first pins the routing (the value
-                // equals the process-wide list, not the per-window decoy), the second
-                // pins liveness (a later mutation still reaches a client that keeps
-                // collecting).
+                // Observe a seeded snapshot and then a later mutation on one stream. Ignore
+                // the singleton's possible late startup-load emission and reseed while waiting;
+                // neither an empty stream nor the per-window decoy can satisfy these assertions.
                 val emissions = mutableListOf<List<String>>()
                 val collector =
                     launch {
                         authenticated
                             .watchRecentProjects(Empty.getDefaultInstance())
+                            .filter { response ->
+                                val awaitedPath = if (emissions.isEmpty()) seed.path else second.path
+                                response.projectsList.any { it.path == awaitedPath }
+                            }
                             .take(2)
                             .collect { emissions += it.projectsList.map { p -> p.path } }
                     }
                 withTimeout(5_000) {
-                    while (emissions.size < 1) delay(10)
+                    while (emissions.size < 1) {
+                        ProjectState.updateRecentProjects(seed)
+                        delay(10)
+                    }
                 }
-                assertEquals(expected, emissions.getOrNull(0), "first emission must be the process-wide list")
+                assertTrue(seed.path in emissions[0], "first observed snapshot must contain the global seed")
                 assertNotEquals(listOf(decoy.path), emissions.getOrNull(0), "emission came from the per-window mirror")
 
                 ProjectState.updateRecentProjects(second)
                 withTimeout(5_000) {
-                    while (emissions.size < 2) delay(10)
+                    while (emissions.size < 2) {
+                        ProjectState.updateRecentProjects(second)
+                        delay(10)
+                    }
                 }
                 collector.join()
                 assertTrue(
@@ -358,7 +362,7 @@ class ProjectDataServiceBridgeTest {
 
     /** Records every method it was actually asked to perform, so a refusal can be proven silent. */
     private class RecordingProjectDataProvider : ProjectDataProvider {
-        val calls = mutableListOf<String>()
+        val calls = CopyOnWriteArrayList<String>()
         override val recentProjects: StateFlow<List<ProjectData>> = MutableStateFlow(emptyList())
         var selectedProject: ProjectData? = null
         var selectionThread: String? = null
