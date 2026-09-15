@@ -282,6 +282,12 @@ class MainFunctionDetectorTest {
     }
 
     // ==================== generateCommand: quoting and injection safety ====================
+    //
+    // Every case below is run through the platform-explicit 3-argument [generateCommand]
+    // overload, once with `forWindows = false` (POSIX) and once with `forWindows = true`
+    // (PowerShell) - BossConsole#594: the single-argument override only ever exercises
+    // whichever shell the CI runner happens to be on, which is exactly how a PowerShell
+    // parse error on every apostrophe-containing Windows path shipped with green CI.
 
     private fun detectedIn(
         path: String,
@@ -296,36 +302,79 @@ class MainFunctionDetectorTest {
     )
 
     @Test
-    fun `python command single-quotes the path`() {
-        val command = detector.generateCommand(detectedIn("/no-such-root/app.py", Language.PYTHON), "/no-such-root")
+    fun `python command single-quotes the path on posix`() {
+        val command =
+            detector.generateCommand(
+                detectedIn("/no-such-root/app.py", Language.PYTHON),
+                "/no-such-root",
+                forWindows = false,
+            )
         assertEquals("python3 '/no-such-root/app.py'", command)
     }
 
     @Test
-    fun `injection-shaped path stays inert inside single quotes`() {
+    fun `python command single-quotes the path on powershell`() {
+        val command =
+            detector.generateCommand(
+                detectedIn("/no-such-root/app.py", Language.PYTHON),
+                "/no-such-root",
+                forWindows = true,
+            )
+        assertEquals("python3 '/no-such-root/app.py'", command)
+    }
+
+    @Test
+    fun `injection-shaped path stays inert inside single quotes on posix`() {
         val command =
             detector.generateCommand(
                 detectedIn("/no-such-root/\$(rm -rf ~)/app.py", Language.PYTHON),
                 "/no-such-root",
+                forWindows = false,
             )
         assertEquals("python3 '/no-such-root/\$(rm -rf ~)/app.py'", command)
     }
 
     @Test
-    fun `single quote in path is escaped with the quote-backslash-quote idiom`() {
-        val command = detector.generateCommand(detectedIn("/no-such-root/it's.py", Language.PYTHON), "/no-such-root")
+    fun `single quote in path is escaped with the quote-backslash-quote idiom on posix`() {
+        val command =
+            detector.generateCommand(
+                detectedIn("/no-such-root/it's.py", Language.PYTHON),
+                "/no-such-root",
+                forWindows = false,
+            )
         assertEquals("python3 '/no-such-root/it'\\''s.py'", command)
+    }
+
+    @Test
+    fun `single quote in path is doubled for powershell, not backslash-escaped`() {
+        // BossConsole#594: 'it'\''s' is a PowerShell parse error ("The string is missing
+        // the terminator: '."); PowerShell doubles the embedded quote instead.
+        val command =
+            detector.generateCommand(
+                detectedIn("C:\\Users\\it's\\app.py", Language.PYTHON),
+                "C:\\Users",
+                forWindows = true,
+            )
+        assertEquals("python3 'C:\\Users\\it''s\\app.py'", command)
     }
 
     @Test
     fun `javascript and typescript commands use node and ts-node`() {
         assertEquals(
             "node '/no-such-root/tool.js'",
-            detector.generateCommand(detectedIn("/no-such-root/tool.js", Language.JAVASCRIPT), "/no-such-root"),
+            detector.generateCommand(
+                detectedIn("/no-such-root/tool.js", Language.JAVASCRIPT),
+                "/no-such-root",
+                forWindows = false,
+            ),
         )
         assertEquals(
             "npx ts-node '/no-such-root/tool.ts'",
-            detector.generateCommand(detectedIn("/no-such-root/tool.ts", Language.TYPESCRIPT), "/no-such-root"),
+            detector.generateCommand(
+                detectedIn("/no-such-root/tool.ts", Language.TYPESCRIPT),
+                "/no-such-root",
+                forWindows = false,
+            ),
         )
     }
 
@@ -333,7 +382,11 @@ class MainFunctionDetectorTest {
     fun `go command runs the file directly`() {
         assertEquals(
             "go run '/no-such-root/main.go'",
-            detector.generateCommand(detectedIn("/no-such-root/main.go", Language.GO), "/no-such-root"),
+            detector.generateCommand(
+                detectedIn("/no-such-root/main.go", Language.GO),
+                "/no-such-root",
+                forWindows = false,
+            ),
         )
     }
 
@@ -341,8 +394,58 @@ class MainFunctionDetectorTest {
     fun `kts scripts run via kotlinc -script`() {
         assertEquals(
             "kotlinc -script '/no-such-root/build tool.kts'",
-            detector.generateCommand(detectedIn("/no-such-root/build tool.kts", Language.KOTLIN), "/no-such-root"),
+            detector.generateCommand(
+                detectedIn("/no-such-root/build tool.kts", Language.KOTLIN),
+                "/no-such-root",
+                forWindows = false,
+            ),
         )
+    }
+
+    // ==================== generateCommand: standalone-file compile+run fallback ====================
+
+    @Test
+    fun `standalone kotlin file falls back to compiling into the real system temp dir, not literal tmp`(
+        @TempDir tempDir: File,
+    ) {
+        val source = File(tempDir, "Scratch.kt").apply { writeText("fun main() {}") }
+        val expectedJar = File(System.getProperty("java.io.tmpdir"), "Scratch.jar").absolutePath
+
+        val posix =
+            detector.generateCommand(
+                detectedIn(source.absolutePath, Language.KOTLIN),
+                tempDir.absolutePath,
+                forWindows = false,
+            )
+        assertTrue(posix.contains("-d '$expectedJar'"), "expected the real temp dir in: $posix")
+        assertTrue(posix.contains("java -jar '$expectedJar'"))
+        assertTrue(posix.contains(" && "), "posix chains with && so a failed compile skips the run")
+
+        val windows =
+            detector.generateCommand(
+                detectedIn(source.absolutePath, Language.KOTLIN),
+                tempDir.absolutePath,
+                forWindows = true,
+            )
+        assertTrue(windows.contains("-d '$expectedJar'"))
+        assertTrue(windows.contains("; "), "powershell chains with ; not &&")
+    }
+
+    @Test
+    fun `standalone rust file falls back to compiling into the real system temp dir, not literal tmp`(
+        @TempDir tempDir: File,
+    ) {
+        val source = File(tempDir, "scratch.rs").apply { writeText("fn main() {}") }
+        val expectedOutput = File(System.getProperty("java.io.tmpdir"), "scratch").absolutePath
+
+        val command =
+            detector.generateCommand(
+                detectedIn(source.absolutePath, Language.RUST),
+                tempDir.absolutePath,
+                forWindows = false,
+            )
+        assertTrue(command.contains("-o '$expectedOutput'"), "expected the real temp dir in: $command")
+        assertTrue(command.endsWith("'$expectedOutput'"))
     }
 
     // ==================== generateCommand: project-aware commands ====================
