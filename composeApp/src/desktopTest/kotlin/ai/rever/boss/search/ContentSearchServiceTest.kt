@@ -2,8 +2,11 @@ package ai.rever.boss.search
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -589,5 +592,154 @@ class ContentSearchServiceTest {
                     "character stream has stopped working",
             )
         }
+    }
+
+    // ---- BossConsole#622: concurrent closed-file replacements ----
+    //
+    // Two overlapping replacements against the same closed file each used to read their own
+    // snapshot, compute independently, and race to write it back - whichever finished last
+    // silently reversed the other's already-reported-successful edit, both calls still
+    // reporting success. FileReplaceCoordination now serializes the whole
+    // read/compute/persist transaction per file, so whichever call's transaction the
+    // scheduler runs second re-reads the file AFTER the first one's write and computes its
+    // own replacement on top of it - the result is the same, and correct, regardless of
+    // which of the two orderings actually happens. Run several times: the two concurrent
+    // calls can settle either order, and both must produce the same right answer.
+    private suspend fun bothReplacementsSurvive(
+        service1: ContentSearchService,
+        service2: ContentSearchService,
+        file: File,
+    ) {
+        repeat(10) {
+            file.writeText("alpha beta\n")
+
+            coroutineScope {
+                val a =
+                    async {
+                        service1.replaceInProject(
+                            query = "alpha",
+                            replacement = "ALPHA",
+                            files = listOf(file.name),
+                            dryRun = false,
+                        )
+                    }
+                val b =
+                    async {
+                        service2.replaceInProject(
+                            query = "beta",
+                            replacement = "BETA",
+                            files = listOf(file.name),
+                            dryRun = false,
+                        )
+                    }
+                assertEquals(1, a.await().totalReplacements, "op A reported no replacement")
+                assertEquals(1, b.await().totalReplacements, "op B reported no replacement")
+            }
+
+            assertEquals(
+                "ALPHA BETA\n",
+                file.readText(),
+                "one operation silently reversed the other's completed edit (iteration $it)",
+            )
+        }
+    }
+
+    @Test
+    fun `concurrent replacements to the same closed file, through one instance, preserve both edits`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        withTimeout(5_000) {
+            val file = File(dir, "document.txt")
+            val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+            bothReplacementsSurvive(service, service, file)
+        }
+    }
+
+    @Test
+    fun `concurrent replacements to the same closed file, through two service instances, preserve both edits`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        withTimeout(5_000) {
+            // Mirrors DefaultPlugin.projectSearchProvider: one window-scoped
+            // ContentSearchService per window, all pointed at the same project - the exact
+            // shape #622 was filed against.
+            val file = File(dir, "document.txt")
+            val serviceA = ContentSearchService(projectPathProvider = { dir.absolutePath })
+            val serviceB = ContentSearchService(projectPathProvider = { dir.absolutePath })
+            bothReplacementsSurvive(serviceA, serviceB, file)
+        }
+    }
+
+    @Test
+    fun `concurrent dry-run replacements to the same file never write and report correct counts`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val file = File(dir, "document.txt")
+        file.writeText("alpha alpha beta\n")
+        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+        coroutineScope {
+            val a =
+                async {
+                    service.replaceInProject(
+                        query = "alpha",
+                        replacement = "ALPHA",
+                        files = listOf("document.txt"),
+                        dryRun = true,
+                    )
+                }
+            val b =
+                async {
+                    service.replaceInProject(
+                        query = "beta",
+                        replacement = "BETA",
+                        files = listOf("document.txt"),
+                        dryRun = true,
+                    )
+                }
+            assertEquals(2, a.await().totalReplacements)
+            assertEquals(1, b.await().totalReplacements)
+        }
+
+        assertEquals(
+            "alpha alpha beta\n",
+            file.readText(),
+            "dry run must never write, even while holding the file lock",
+        )
+    }
+
+    @Test
+    fun `concurrent replacements to independent files both succeed`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val a = File(dir, "a.txt").apply { writeText("alpha\n") }
+        val b = File(dir, "b.txt").apply { writeText("beta\n") }
+        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+        coroutineScope {
+            val resultA =
+                async {
+                    service.replaceInProject(
+                        query = "alpha",
+                        replacement = "ALPHA",
+                        files = listOf("a.txt"),
+                        dryRun = false,
+                    )
+                }
+            val resultB =
+                async {
+                    service.replaceInProject(
+                        query = "beta",
+                        replacement = "BETA",
+                        files = listOf("b.txt"),
+                        dryRun = false,
+                    )
+                }
+            assertEquals(1, resultA.await().totalReplacements)
+            assertEquals(1, resultB.await().totalReplacements)
+        }
+
+        assertEquals("ALPHA\n", a.readText())
+        assertEquals("BETA\n", b.readText())
     }
 }
