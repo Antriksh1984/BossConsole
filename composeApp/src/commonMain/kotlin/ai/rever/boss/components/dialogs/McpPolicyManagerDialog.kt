@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,9 +24,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
+import androidx.compose.material.Divider
+import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
+import androidx.compose.material.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -98,35 +102,71 @@ fun McpPolicyManagerDialog(
     // (McpPolicyEngine.policyFor). Tracks at most one row at a time - switching to a different
     // row's button, or dismissing, drops any pending confirmation rather than carrying it silently.
     var confirmingDeny by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
+    val filteredRules = rules.filterKeys { it.contains(query.trim(), ignoreCase = true) }
+    val filteredTools =
+        availableTools.filter {
+            it.matchesPolicyQuery(query)
+        }
 
     BossDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(),
     ) {
         Surface(
-            modifier = Modifier.widthIn(max = maxWidth).width(480.dp).heightIn(max = maxHeight),
+            modifier = Modifier.widthIn(max = maxWidth).width(600.dp).heightIn(max = maxHeight),
             shape = RoundedCornerShape(radii.dialog),
             color = colors.panel,
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     Text(
-                        text = "Persistent MCP Tool Policies",
-                        fontSize = 18.sp,
+                        text = "MCP tool policies",
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = colors.textPrimary,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text =
-                            "Saved from \"Always Allow\" / \"Always Deny\" in the tool approval dialog. " +
-                                "Resetting a tool removes its saved rule - the next mutating call is " +
-                                "governed by the default policy again, asking unless that default is " +
-                                "itself Allow or Deny.",
+                        text = "Manage how tools request permission. Saved rules apply across agents and restarts.",
                         fontSize = 12.sp,
                         color = colors.textSecondary,
                     )
                     Spacer(modifier = Modifier.height(16.dp))
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = {
+                            query = it
+                            confirmingDeny = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Find a tool or provider", fontSize = 12.sp) },
+                        shape = RoundedCornerShape(8.dp),
+                        colors =
+                            TextFieldDefaults.outlinedTextFieldColors(
+                                textColor = colors.textPrimary,
+                                cursorColor = colors.signal,
+                                focusedBorderColor = colors.signal,
+                                unfocusedBorderColor = colors.textSecondary.copy(alpha = 0.25f),
+                                placeholderColor = colors.textSecondary,
+                                backgroundColor = colors.textSecondary.copy(alpha = 0.04f),
+                            ),
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Text(
+                        text = "Saved rules · ${rules.size}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textPrimary,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Reset removes a saved rule. Default policy and session trust then apply.",
+                        fontSize = 11.sp,
+                        color = colors.textSecondary,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // The surrounding body scrolls as one region; Close stays outside it.
                     Column(
@@ -134,16 +174,23 @@ fun McpPolicyManagerDialog(
                             Modifier
                                 .fillMaxWidth(),
                     ) {
-                        if (rules.isEmpty()) {
+                        if (filteredRules.isEmpty()) {
                             Text(
-                                text = "No saved rules. Default policies and session trust still apply.",
+                                text = emptyRulesMessage(rules.isEmpty()),
                                 fontSize = 13.sp,
                                 color = colors.textSecondary,
                             )
                         } else {
-                            rules.toSortedMap().forEach { (toolName, action) ->
+                            filteredRules.toSortedMap().forEach { (toolName, action) ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 3.dp)
+                                            .background(
+                                                color = colors.textSecondary.copy(alpha = 0.04f),
+                                                shape = RoundedCornerShape(8.dp),
+                                            ).padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
@@ -197,7 +244,7 @@ fun McpPolicyManagerDialog(
                                         }
                                     } else {
                                         TextButton(onClick = { revoke() }) {
-                                            Text("Reset", fontSize = 12.sp)
+                                            Text("Reset", fontSize = 12.sp, color = colors.signal)
                                         }
                                     }
                                 }
@@ -206,7 +253,7 @@ fun McpPolicyManagerDialog(
 
                         Spacer(modifier = Modifier.height(20.dp))
                         Text(
-                            text = "Set a rule proactively",
+                            text = "Available tools · ${availableTools.size}",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = colors.textPrimary,
@@ -214,17 +261,24 @@ fun McpPolicyManagerDialog(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text =
-                                "For a registered tool without a saved rule - no need to wait for an approval " +
-                                    "prompt to lock one down. A tool name, not a specific plugin: another " +
-                                    "plugin that later registers the same name inherits this rule too.",
+                                "Choose Allow or Deny for a tool without a saved rule. " +
+                                    "Rules follow the tool name, including replacement plugins.",
                             fontSize = 11.sp,
                             color = colors.textSecondary,
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        ProactivePolicySectionContent(availableTools, onSetPolicy, onRefreshCandidates, colors)
+                        FilteredPolicyCandidates(
+                            filteredTools,
+                            availableTools.isNotEmpty(),
+                            onSetPolicy,
+                            onRefreshCandidates,
+                            colors,
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
+                Divider(color = colors.textSecondary.copy(alpha = 0.15f))
+                Spacer(modifier = Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     Button(
                         onClick = onDismiss,
@@ -235,6 +289,27 @@ fun McpPolicyManagerDialog(
                 }
             }
         }
+    }
+}
+
+private fun emptyRulesMessage(noSavedRules: Boolean): String =
+    if (noSavedRules) "No saved rules. Default policies and session trust still apply." else "No matching saved rules."
+
+private fun McpToolIdentity.matchesPolicyQuery(query: String): Boolean =
+    toolName.contains(query.trim(), ignoreCase = true) || providerId.contains(query.trim(), ignoreCase = true)
+
+@Composable
+private fun FilteredPolicyCandidates(
+    tools: List<McpToolIdentity>,
+    hasAvailableTools: Boolean,
+    onSetPolicy: suspend (McpToolIdentity, McpPolicyAction) -> McpProactivePolicyOutcome,
+    onRefreshCandidates: () -> Unit,
+    colors: BossColorScheme,
+) {
+    if (tools.isEmpty() && hasAvailableTools) {
+        Text("No matching tools.", fontSize = 12.sp, color = colors.textSecondary)
+    } else {
+        ProactivePolicySectionContent(tools, onSetPolicy, onRefreshCandidates, colors)
     }
 }
 
@@ -320,7 +395,16 @@ private fun ProactivePolicyRow(
     onSet: (McpPolicyAction) -> Unit,
     colors: BossColorScheme,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 3.dp)
+                .background(
+                    color = colors.textSecondary.copy(alpha = 0.04f),
+                    shape = RoundedCornerShape(8.dp),
+                ).padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(

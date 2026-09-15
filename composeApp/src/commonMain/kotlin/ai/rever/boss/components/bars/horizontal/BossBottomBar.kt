@@ -42,6 +42,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -353,12 +354,12 @@ private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfi
     var showPolicyManager by remember { mutableStateOf(false) }
     val ruleCount = persistedPolicyConfig.rules.size
     if (ruleCount > 0 || allTools.isNotEmpty()) {
-        androidx.compose.material.TextButton(onClick = { showPolicyManager = true }) {
-            Text(
-                if (ruleCount > 0) "Persisted MCP policies ($ruleCount)" else "Set MCP tool policies",
-                color = BossTheme.colors.textSecondary,
-            )
-        }
+        BossActionButton(
+            imageVector = Icons.Outlined.Tune,
+            text = if (ruleCount > 0) "Tool policies ($ruleCount)" else "Tool policies",
+            color = BossTheme.colors.textSecondary,
+            onClick = { showPolicyManager = true },
+        )
     }
     if (showPolicyManager) {
         val disabledToolNames by McpToolRegistryImpl.disabledToolNames.collectAsState()
