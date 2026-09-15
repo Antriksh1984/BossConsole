@@ -7,6 +7,8 @@ import ai.rever.boss.plugin.api.RunConfigurationData
 import ai.rever.boss.plugin.api.RunConfigurationDataProvider
 import ai.rever.boss.plugin.api.RunConfigurationTypeData
 import io.grpc.ManagedChannel
+import io.grpc.Status
+import java.util.logging.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +21,9 @@ import kotlinx.coroutines.launch
 
 /**
  * IPC proxy implementation of RunConfigurationDataProvider.
+ * Execution uses the host configuration identified by [RunConfigurationData.id].
+ * Command, argument, environment and working-directory edits in the supplied copy
+ * are ignored by the host; rescan and use a currently detected configuration.
  */
 class RunConfigDataProviderProxy(
     channel: ManagedChannel,
@@ -144,7 +149,9 @@ class RunConfigDataProviderProxy(
             clearLocalExecutionError()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Logger.getLogger(RunConfigDataProviderProxy::class.java.name)
+                .warning("Run configuration RPC failed: ${Status.fromThrowable(error).code.name}")
             // Do not infer a stale id from every RPC failure (transport and authorization
             // failures can reach this path too), or expose arbitrary remote exception text.
             synchronized(errorLock) {
