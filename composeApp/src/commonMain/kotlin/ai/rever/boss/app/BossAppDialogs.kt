@@ -658,7 +658,22 @@ internal fun BossAppDialogs(state: BossAppState) {
                         MenuActionsHandler.triggerShowShortcutHelp(windowId)
                     }
 
-                    else -> {} // Unknown command
+                    else -> {
+                        // Every tab-navigation and browser-history command Spotlight advertises
+                        // (BossConsole#700) - previously silently discarded here.
+                        if (!dispatchSpotlightTabBrowserCommand(actionId, windowId)) {
+                            // The editor verbs and the debug external-link entry have no safe
+                            // host route (see SpotlightTabBrowserCommands.kt); report that
+                            // explicitly rather than discarding the selection with no signal.
+                            // A truly unclassified future id - which SpotlightCommandCoverageTest
+                            // exists to prevent - gets the same honest message rather than
+                            // nothing at all.
+                            StatusMessageManager.showMessage(
+                                "\"${KeymapActions.getDescription(actionId)}\" isn't available from Spotlight yet",
+                                durationMs = 4_000L,
+                            )
+                        }
+                    }
                 }
                 state.focusRequester.requestFocus()
             },
