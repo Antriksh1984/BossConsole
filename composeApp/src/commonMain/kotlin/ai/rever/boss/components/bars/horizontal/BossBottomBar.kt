@@ -354,12 +354,17 @@ private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfi
     var showPolicyManager by remember { mutableStateOf(false) }
     val ruleCount = persistedPolicyConfig.rules.size
     if (ruleCount > 0 || allTools.isNotEmpty()) {
-        BossActionButton(
-            imageVector = Icons.Outlined.Tune,
-            text = if (ruleCount > 0) "Tool policies ($ruleCount)" else "Tool policies",
-            color = BossTheme.colors.textSecondary,
-            onClick = { showPolicyManager = true },
-        )
+        HoverTooltipBox(
+            text = "Manage MCP tool permissions. Review, allow, deny, or reset saved rules across agents and restarts.",
+            placement = TooltipPlacement.TOP,
+        ) {
+            BossActionButton(
+                imageVector = Icons.Outlined.Tune,
+                text = if (ruleCount > 0) "Tool policies ($ruleCount)" else "Tool policies",
+                color = BossTheme.colors.textSecondary,
+                onClick = { showPolicyManager = true },
+            )
+        }
     }
     if (showPolicyManager) {
         val disabledToolNames by McpToolRegistryImpl.disabledToolNames.collectAsState()
