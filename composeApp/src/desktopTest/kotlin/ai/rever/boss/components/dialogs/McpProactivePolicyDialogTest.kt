@@ -141,6 +141,8 @@ class McpProactivePolicyDialogTest {
         }
         rule.onNodeWithText("Allow", substring = false).performScrollTo().performClick()
         rule.onNodeWithText("Confirm allow?").assertExists()
+        rule.runOnIdle { assertEquals(0, writes) }
+        closeIsInsideWindow()
         rule.runOnIdle { candidate.value = candidate.value.copy(expectedRevocation = 1) }
         rule.onNodeWithText("Confirm allow?").assertDoesNotExist()
         rule.onNodeWithText("Allow", substring = false).performScrollTo().performClick()
@@ -161,6 +163,7 @@ class McpProactivePolicyDialogTest {
             )
         }
         rule.onNodeWithText("Deny", substring = false).performScrollTo().performClick()
+        rule.onNodeWithText("Save rule").performScrollTo().performClick()
         rule.onNodeWithText("Policy changed.", substring = true).assertExists()
         rule.runOnIdle { assertEquals(1, refreshes) }
         assertTrue(McpProactivePolicyOutcome.Failed("disk").proactivePolicyMessage()!!.contains("storage"))
@@ -178,6 +181,7 @@ class McpProactivePolicyDialogTest {
             )
         }
         rule.onNodeWithText("Deny", substring = false).performScrollTo().performClick()
+        rule.onNodeWithText("Save rule").performScrollTo().performClick()
         rule.onNodeWithText("Policy file unreadable:", substring = true).performScrollTo().assertIsDisplayed()
         assertTrue(McpProactivePolicyOutcome.Denied.proactivePolicyMessage()!!.contains("already denies"))
     }

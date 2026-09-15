@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,12 +21,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Divider
 import androidx.compose.material.OutlinedTextField
+import androidx.compose.material.RadioButton
+import androidx.compose.material.RadioButtonDefaults
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -40,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -350,11 +356,11 @@ private fun ProactivePolicySectionContent(
     // Like revoke feedback, retain only the latest attempted row outcome.
     var failedSet by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Allow raises standing privilege strictly further than anything else in this dialog can -
-    // ASK-forever into unattended ALLOW for every future agent and argument set - so it gets the
+    // Default policy into unattended ALLOW for every future agent and argument set - so it gets the
     // same second-tap confirmation removing a DENY gets above, plus the risk/scope context
-    // McpApprovalDialog shows before its own "Always Allow" (review on #636). Deny only ever
-    // narrows what a tool can do, so it fires on the first tap like Reset does above.
-    var confirmingAllow by remember(availableTools) { mutableStateOf<McpToolIdentity?>(null) }
+    // McpApprovalDialog shows before its own "Always Allow" (review on #636). Selecting either
+    // radio option only stages it; saving is a separate explicit action.
+    var pending by remember(availableTools) { mutableStateOf<Pair<McpToolIdentity, McpPolicyAction>?>(null) }
 
     if (availableTools.isEmpty()) {
         Text(
@@ -365,23 +371,34 @@ private fun ProactivePolicySectionContent(
         return
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        availableTools.forEach { tool ->
-            ProactivePolicyRow(
-                tool = tool,
-                confirming = confirmingAllow == tool,
-                failureMessage = failedSet?.takeIf { it.first == tool.toolName }?.second,
-                onArmAllow = { confirmingAllow = tool },
-                onSet = { action ->
-                    confirmingAllow = null
-                    scope.launch {
-                        val outcome = onSetPolicy(tool, action)
-                        failedSet = outcome.proactivePolicyMessage()?.let { tool.toolName to it }
-                        if (outcome is McpProactivePolicyOutcome.Refused) onRefreshCandidates()
-                    }
-                },
-                colors = colors,
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        availableTools.groupBy { it.providerId }.forEach { (provider, tools) ->
+            Text(
+                text = "$provider · ${tools.size} tools",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textSecondary,
+                modifier = Modifier.padding(top = 8.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
+            tools.forEach { tool ->
+                ProactivePolicyRow(
+                    tool = tool,
+                    selected = pending?.takeIf { it.first == tool }?.second,
+                    failureMessage = failedSet?.takeIf { it.first == tool.toolName }?.second,
+                    onSelect = { pending = tool to it },
+                    onSave = { action ->
+                        pending = null
+                        scope.launch {
+                            val outcome = onSetPolicy(tool, action)
+                            failedSet = outcome.proactivePolicyMessage()?.let { tool.toolName to it }
+                            if (outcome is McpProactivePolicyOutcome.Refused) onRefreshCandidates()
+                        }
+                    },
+                    colors = colors,
+                )
+            }
         }
     }
 }
@@ -389,64 +406,78 @@ private fun ProactivePolicySectionContent(
 @Composable
 private fun ProactivePolicyRow(
     tool: McpToolIdentity,
-    confirming: Boolean,
+    selected: McpPolicyAction?,
     failureMessage: String?,
-    onArmAllow: () -> Unit,
-    onSet: (McpPolicyAction) -> Unit,
+    onSelect: (McpPolicyAction) -> Unit,
+    onSave: (McpPolicyAction) -> Unit,
     colors: BossColorScheme,
 ) {
-    Column(
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = colors.textSecondary.copy(alpha = 0.035f),
+        border = BorderStroke(1.dp, colors.textSecondary.copy(alpha = 0.14f)),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                text = tool.toolName,
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary,
+            )
+            Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PolicyChoice("Allow", selected == McpPolicyAction.ALLOW, { onSelect(McpPolicyAction.ALLOW) }, colors)
+                PolicyChoice("Deny", selected == McpPolicyAction.DENY, { onSelect(McpPolicyAction.DENY) }, colors)
+            }
+            if (selected == McpPolicyAction.ALLOW) {
+                ProactiveAllowConfirmation(tool.toolName, colors)
+            }
+            if (failureMessage != null) {
+                Text(failureMessage, fontSize = 12.sp, color = colors.alert)
+            }
+            selected?.let { action ->
+                Button(
+                    onClick = { onSave(action) },
+                    colors =
+                        ButtonDefaults.buttonColors(
+                            backgroundColor = colors.signal,
+                            contentColor = colors.onSignal,
+                        ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text(if (action == McpPolicyAction.ALLOW) "Confirm allow?" else "Save rule", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PolicyChoice(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    colors: BossColorScheme,
+) {
+    Row(
         modifier =
             Modifier
-                .fillMaxWidth()
-                .padding(vertical = 3.dp)
                 .background(
-                    color = colors.textSecondary.copy(alpha = 0.04f),
-                    shape = RoundedCornerShape(8.dp),
-                ).padding(horizontal = 12.dp, vertical = 8.dp),
+                    if (selected) colors.signal.copy(alpha = 0.10f) else colors.textSecondary.copy(alpha = 0.04f),
+                    RoundedCornerShape(8.dp),
+                ).selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = tool.toolName,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = tool.providerId,
-                    fontSize = 10.sp,
-                    color = colors.textSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (failureMessage != null) {
-                    Text(
-                        text = failureMessage,
-                        fontSize = 10.sp,
-                        color = colors.alert,
-                    )
-                }
-            }
-
-            if (confirming) {
-                TextButton(onClick = { onSet(McpPolicyAction.ALLOW) }) {
-                    Text("Confirm allow?", fontSize = 11.sp, color = colors.warn)
-                }
-            } else {
-                TextButton(onClick = onArmAllow) {
-                    Text("Allow", fontSize = 11.sp, color = colors.warn)
-                }
-            }
-            TextButton(onClick = { onSet(McpPolicyAction.DENY) }) {
-                Text("Deny", fontSize = 11.sp, color = colors.alert)
-            }
-        }
-        if (confirming) {
-            ProactiveAllowConfirmation(tool.toolName, colors)
-        }
+        RadioButton(
+            selected = selected,
+            onClick = null,
+            colors = RadioButtonDefaults.colors(selectedColor = colors.signal, unselectedColor = colors.textSecondary),
+        )
+        Text(label, fontSize = 13.sp, color = colors.textPrimary)
     }
 }
 
@@ -458,18 +489,18 @@ private fun ProactiveAllowConfirmation(
 ) {
     val risk = remember(toolName) { DefaultMcpRiskEvaluator().evaluateRisk(toolName, McpToolArgs(emptyMap())) }
     if (McpMutatingToolCatalog.isMutating(toolName)) {
-        Text("This tool performs mutations or external execution.", fontSize = 10.sp, color = colors.alert)
+        Text("This tool performs mutations or external execution.", fontSize = 12.sp, color = colors.alert)
     }
     Text(
         text = "${risk.level}: ${risk.reason}",
-        fontSize = 10.sp,
+        fontSize = 12.sp,
         color = colors.alert,
     )
     Text(
         text =
             "Applies to this tool name for all agents and arguments, across restarts " +
                 "and replacement plugins, until reset above.",
-        fontSize = 10.sp,
+        fontSize = 12.sp,
         color = colors.textSecondary,
     )
 }
