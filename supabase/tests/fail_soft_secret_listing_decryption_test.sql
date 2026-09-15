@@ -15,7 +15,7 @@ BEGIN
 END;
 $fixture$;
 
--- ---- try_decrypt_text itself: NULL on any failure, real plaintext otherwise.
+-- ---- try_decrypt_text: NULL on damaged data, real plaintext otherwise.
 SELECT is(public.try_decrypt_text(NULL), NULL::text, 'NULL input stays NULL');
 SELECT is(public.try_decrypt_text('not even base64!!'), NULL::text, 'garbage input fails closed instead of raising');
 SELECT is(public.try_decrypt_text('v2:dGVzdA=='), NULL::text, 'a well-formed but undecryptable v2 envelope fails closed instead of raising');
@@ -57,21 +57,43 @@ SELECT throws_ok($$ SELECT public.try_decrypt_text('anything') $$, '42501', NULL
 SELECT lives_ok($$ SELECT * FROM public.get_user_secrets() $$, 'get_user_secrets does not raise with a corrupt row in the page');
 SELECT is((SELECT count(*) FROM public.get_user_secrets()), 2::bigint, 'get_user_secrets still returns both rows');
 SELECT is((SELECT password FROM public.get_user_secrets() WHERE id = 'd1900000-0000-4000-8000-000000000011'), 'good-password', 'the good row still decrypts');
-SELECT is((SELECT password FROM public.get_user_secrets() WHERE id = 'd1900000-0000-4000-8000-000000000012'), NULL::text, 'the corrupt row is blanked, not raised');
+SELECT is((SELECT password FROM public.get_user_secrets() WHERE id = 'd1900000-0000-4000-8000-000000000012'), ''::text, 'the corrupt row is blanked, not raised');
 SELECT is((SELECT metadata->'recovery_codes' FROM public.get_user_secrets() WHERE id = 'd1900000-0000-4000-8000-000000000012'), '[]'::jsonb, 'corrupt recovery codes blank to an empty array');
 SELECT is((SELECT metadata->'recovery_codes' FROM public.get_user_secrets() WHERE id = 'd1900000-0000-4000-8000-000000000011'), '["code-a","code-b"]'::jsonb, 'the good row''s recovery codes still decrypt');
 
 -- search_user_secrets
 SELECT lives_ok($$ SELECT * FROM public.search_user_secrets('failsoft') $$, 'search_user_secrets does not raise with a corrupt row in the results');
 SELECT is((SELECT count(*) FROM public.search_user_secrets('failsoft')), 2::bigint, 'search_user_secrets still returns both rows');
-SELECT is((SELECT password FROM public.search_user_secrets('failsoft') WHERE id = 'd1900000-0000-4000-8000-000000000012'), NULL::text, 'the corrupt row is blanked in search results too');
+SELECT is((SELECT password FROM public.search_user_secrets('failsoft') WHERE id = 'd1900000-0000-4000-8000-000000000012'), ''::text, 'the corrupt row is blanked in search results too');
 
 -- get_user_secrets_with_shared
 SELECT lives_ok($$ SELECT * FROM public.get_user_secrets_with_shared() $$, 'get_user_secrets_with_shared does not raise with a corrupt row in the page');
 SELECT is((SELECT count(*) FROM public.get_user_secrets_with_shared()), 2::bigint, 'get_user_secrets_with_shared still returns both rows');
 SELECT is((SELECT password FROM public.get_user_secrets_with_shared() WHERE id = 'd1900000-0000-4000-8000-000000000011'), 'good-password', 'the good row still decrypts via the shared RPC');
-SELECT is((SELECT password FROM public.get_user_secrets_with_shared() WHERE id = 'd1900000-0000-4000-8000-000000000012'), NULL::text, 'the corrupt row is blanked via the shared RPC, not raised');
+SELECT is((SELECT password FROM public.get_user_secrets_with_shared() WHERE id = 'd1900000-0000-4000-8000-000000000012'), ''::text, 'the corrupt row is blanked via the shared RPC, not raised');
 
 RESET ROLE;
+-- Missing keys and systemic errors must not turn the entire page into blanks.
+CREATE OR REPLACE FUNCTION public.get_encryption_key() RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
+    RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'synthetic unavailable key';
+END $$;
+SELECT throws_ok($$SELECT * FROM public.get_user_secrets()$$, 'P0001', NULL::text,
+    'missing key propagates through the listing');
+CREATE OR REPLACE FUNCTION public.get_encryption_key() RETURNS text
+LANGUAGE sql SECURITY DEFINER AS $$ SELECT ''::text $$;
+SELECT throws_ok($$SELECT public.try_decrypt_text('invalid')$$, '22023', NULL::text,
+    'empty key propagates');
+CREATE OR REPLACE FUNCTION public.get_encryption_key() RETURNS text
+LANGUAGE sql SECURITY DEFINER AS $$ SELECT 'synthetic-test-key'::text $$;
+CREATE OR REPLACE FUNCTION public.decrypt_text(ciphertext text) RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
+    RAISE EXCEPTION USING ERRCODE = ciphertext, MESSAGE = 'synthetic failure';
+END $$;
+SELECT throws_ok($$SELECT public.try_decrypt_text('42501')$$, '42501', NULL::text, 'privilege errors propagate');
+SELECT throws_ok($$SELECT public.try_decrypt_text('42883')$$, '42883', NULL::text, 'missing decoder propagates');
+SELECT throws_ok($$SELECT public.try_decrypt_text('XX000')$$, 'XX000', NULL::text, 'internal errors propagate');
+SELECT is(public.try_decrypt_text('39000'), NULL::text, 'pgcrypto failures blank only the field');
+SELECT is(public.try_decrypt_text('22P05'), NULL::text, 'untranslatable UTF-8 blanks only the field');
 SELECT * FROM finish();
 ROLLBACK;
