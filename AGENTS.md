@@ -2158,6 +2158,21 @@ rows, and the summary distinguishes rules being replaced from new denials.
 Global None is a distinct deny-all preset, not Custom; Edit is the label at both
 levels. Search by plugin display name also matches its saved tool rules.
 
+## Process-wide plugin registrations belong to window lifetimes
+
+`DefaultPlugin` routes MCP/search providers, panel menus, settings pages, deep-link actions,
+shortcut providers and status-bar items through `WindowRegistrations`. The newest window's
+registration serves every window; unregistering it restores the newest surviving owner.
+Disabling or dynamically unregistering in one window therefore leaves another window's
+registration available. Per-window action dispatch is not implemented by this arbitration.
+
+Each window has a lifetime token. Release fences later registrations and snapshots admitted
+slots under a short owner lock; publication checks the fence under its slot lock. Plugin
+callbacks never run under the owner lock, and disposal does not wait on unowned slots.
+Restoring a shared id re-queries tools()/shortcuts() on the closing thread, so a slow surviving
+provider can delay that close. Replacement warnings and snapshot-at-registration semantics
+are intentional. Global access filters still apply independently of registration ownership.
+
 ### Plugin Dev Staging & Launchpad Invariants
 
 - **Protected Plugins Overrule Dev JARs Unconditionally**:
