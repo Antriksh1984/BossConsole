@@ -9,6 +9,8 @@ import ai.rever.boss.components.dialogs.McpActivityLogDialog
 import ai.rever.boss.components.dialogs.McpPolicyManagerDialog
 import ai.rever.boss.components.dialogs.McpProviderTrustDialog
 import ai.rever.boss.components.events.PanelEventBus
+import ai.rever.boss.components.overlays.HoverTooltipBox
+import ai.rever.boss.components.overlays.TooltipPlacement
 import ai.rever.boss.components.overlays.contextMenu
 import ai.rever.boss.components.plugin.registries.StatusBarRegistryImpl
 import ai.rever.boss.components.plugin.registries.owningPluginId
@@ -29,15 +31,11 @@ import ai.rever.boss.utils.SystemUtils
 import ai.rever.boss.window.LocalWindowId
 import ai.rever.boss.window.LocalWindowProjectState
 import ai.rever.boss.window.Project
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Divider
 import androidx.compose.material.Icon
-import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
@@ -374,6 +372,8 @@ fun BossRightBottomBar() {
 private fun McpActivityStatusItem() {
     val recentOps by McpToolRegistryImpl.ledger.recentOperations.collectAsState()
     var showActivityLog by remember { mutableStateOf(false) }
+    val tools by McpToolRegistryImpl.tools.collectAsState()
+    if (recentOps.isEmpty() && tools.isEmpty() && !showActivityLog) return
     val lastOp = recentOps.firstOrNull()
     val statusText =
         if (lastOp != null) {
@@ -394,6 +394,7 @@ private fun McpActivityStatusItem() {
             operations = recentOps,
             totalCalls = totalCalls,
             totalErrors = totalErrors,
+            ledgerPath = McpToolRegistryImpl.ledger.persistencePath,
             onDismiss = { showActivityLog = false },
         )
     }
@@ -404,29 +405,13 @@ private fun McpActivityStatusItem() {
  * click does, and [Role.Button] semantics for assistive tech - a bare clickable [Text] next to
  * [androidx.compose.material.TextButton]s that do look pressable had none of the three.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun McpActivityStatusText(
     text: String,
     color: Color,
     onClick: () -> Unit,
 ) {
-    TooltipArea(
-        tooltip = {
-            Surface(
-                shape = RoundedCornerShape(BossTheme.radius.dialog),
-                color = BossTheme.colors.panel,
-                elevation = 4.dp,
-            ) {
-                Text(
-                    text = "Open the MCP activity log",
-                    fontSize = 11.sp,
-                    color = BossTheme.colors.textPrimary,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-            }
-        },
-    ) {
+    HoverTooltipBox(text = "Open the MCP activity log", placement = TooltipPlacement.TOP) {
         Text(
             text = text,
             color = color,
@@ -435,9 +420,9 @@ private fun McpActivityStatusText(
             overflow = TextOverflow.Ellipsis,
             modifier =
                 Modifier
-                    .padding(horizontal = 6.dp)
                     .pointerHoverIcon(PointerIcon.Hand)
                     .clickable(onClickLabel = "Open the MCP activity log", onClick = onClick)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
                     .semantics { role = Role.Button },
         )
     }

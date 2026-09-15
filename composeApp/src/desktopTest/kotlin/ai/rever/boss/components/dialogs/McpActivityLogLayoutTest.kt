@@ -64,6 +64,7 @@ class McpActivityLogLayoutTest {
 
     private fun show(
         light: Boolean = false,
+        windowSize: IntSize = IntSize(700, 360),
         content: @Composable () -> Unit,
     ) {
         captureTheme = if (light) "light" else "dark"
@@ -75,10 +76,11 @@ class McpActivityLogLayoutTest {
                 LocalWindowInfo provides
                     object : WindowInfo {
                         override val isWindowFocused = true
-                        override val containerSize = IntSize(700, 360)
+                        override val containerSize = windowSize
                     },
             ) {
-                Box(Modifier.size(700.dp, 360.dp).clipToBounds()) { content() }
+                val width = (if (windowSize.width > 0) windowSize.width else 700).dp
+                Box(Modifier.size(width, 360.dp).clipToBounds()) { content() }
             }
         }
         rule.mainClock.advanceTimeBy(250)
@@ -87,14 +89,7 @@ class McpActivityLogLayoutTest {
     private var captureIndex = 0
 
     private fun closeIsInsideWindow() {
-        val pixels = rule.onRoot().captureToImage().toPixelMap()
-        val image = BufferedImage(pixels.width, pixels.height, BufferedImage.TYPE_INT_ARGB)
-        for (y in 0 until pixels.height) for (x in 0 until pixels.width) image.setRGB(x, y, pixels[x, y].toArgb())
-        val name = "${javaClass.simpleName}-$captureTheme-${++captureIndex}.png"
-        val output = File("build/reports/mcp-review", name)
-        output.parentFile.mkdirs()
-        javax.imageio.ImageIO.write(image, "png", output)
-
+        if (System.getenv("BOSS_REVIEW_CAPTURE") == "1") captureLayout()
         rule.onNodeWithText("Close").assertIsDisplayed()
         val bounds = rule.onNodeWithText("Close").getUnclippedBoundsInRoot()
         assertTrue(bounds.top >= 0.dp && bounds.bottom <= 360.dp, "Close bounds: $bounds")
@@ -113,6 +108,16 @@ class McpActivityLogLayoutTest {
             sanitizedArgs = emptyMap(),
         )
 
+    private fun captureLayout() {
+        val pixels = rule.onRoot().captureToImage().toPixelMap()
+        val image = BufferedImage(pixels.width, pixels.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until pixels.height) for (x in 0 until pixels.width) image.setRGB(x, y, pixels[x, y].toArgb())
+        val name = "${javaClass.simpleName}-$captureTheme-${++captureIndex}.png"
+        val output = File("build/reports/mcp-review", name)
+        output.parentFile.mkdirs()
+        javax.imageio.ImageIO.write(image, "png", output)
+    }
+
     @Test fun `short dark window keeps close visible with 100 long metadata rows`() {
         var closed = false
         show { McpActivityLogDialog((1..100).map { record("tool-$it") }, 100, 100) { closed = true } }
@@ -125,7 +130,7 @@ class McpActivityLogLayoutTest {
 
     @Test fun `empty light dialog updates live without reopening and still closes`() {
         val records = mutableStateOf(emptyList<McpOperationRecord>())
-        show(light = true) { McpActivityLogDialog(records.value, records.value.size.toLong(), 0, {}) }
+        show(light = true) { McpActivityLogDialog(records.value, records.value.size.toLong(), 0, onDismiss = {}) }
         rule.onNodeWithText("No MCP tool calls recorded yet this session.").assertExists()
         closeIsInsideWindow()
         rule.runOnIdle { records.value = listOf(record("new-call")) }
@@ -133,5 +138,20 @@ class McpActivityLogLayoutTest {
         rule.onNodeWithText("new-call").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("Policy Persist Failed").assertExists()
         closeIsInsideWindow()
+    }
+
+    @Test fun `unknown window size falls back without collapsing the dialog`() {
+        show(windowSize = IntSize.Zero) { McpActivityLogDialog(emptyList(), 0, 0, onDismiss = {}) }
+        closeIsInsideWindow()
+        rule.onNodeWithText("Disk persistence is not configured", substring = true).assertExists()
+    }
+
+    @Test fun `narrow window keeps close horizontally inside the viewport`() {
+        show(windowSize = IntSize(360, 360)) {
+            McpActivityLogDialog(listOf(record("tool")), 1, 1, ledgerPath = "/actual/ledger.jsonl", onDismiss = {})
+        }
+        closeIsInsideWindow()
+        assertTrue(rule.onNodeWithText("Close").getUnclippedBoundsInRoot().right <= 360.dp)
+        rule.onNodeWithText("/actual/ledger.jsonl", substring = true).assertExists()
     }
 }

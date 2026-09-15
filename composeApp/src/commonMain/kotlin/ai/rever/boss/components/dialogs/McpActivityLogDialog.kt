@@ -3,12 +3,12 @@ package ai.rever.boss.components.dialogs
 import ai.rever.boss.mcp.McpApprovalDisposition
 import ai.rever.boss.mcp.McpOperationRecord
 import ai.rever.boss.mcp.McpPolicyAction
-import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.plugin.ui.BossColorScheme
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -61,28 +61,23 @@ fun McpActivityLogDialog(
     operations: List<McpOperationRecord>,
     totalCalls: Long,
     totalErrors: Long,
+    ledgerPath: String? = null,
     onDismiss: () -> Unit,
 ) {
-    val windowHeight =
-        with(LocalDensity.current) {
-            LocalWindowInfo.current.containerSize.height
-                .toDp()
-        }
-    val maxHeight = (windowHeight - 32.dp).coerceAtLeast(1.dp)
+    val windowSize = LocalWindowInfo.current.containerSize
+    val windowHeight = with(LocalDensity.current) { windowSize.height.toDp() }
+    val windowWidth = with(LocalDensity.current) { windowSize.width.toDp() }
+    val maxHeight = if (windowHeight > 0.dp) (windowHeight - 32.dp).coerceAtLeast(1.dp) else 700.dp
+    val maxWidth = if (windowWidth > 0.dp) (windowWidth - 32.dp).coerceAtLeast(1.dp) else 560.dp
     val colors = BossTheme.colors
     val radii = BossTheme.radius
     val timeFormat = remember { SimpleDateFormat("MMM d HH:mm:ss", Locale.getDefault()) }
-    // Resolved rather than hardcoded: BOSS_DATA_DIR can redirect BossDirectories.rootDir, and a
-    // literal ~/.boss/mcp-calls.jsonl in user-visible copy would send an operator to a path that
-    // does not exist on such a machine.
-    val ledgerPath = remember { BossDirectories.resolve(MCP_LEDGER_FILE_NAME).absolutePath }
-
     BossDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(),
     ) {
         Surface(
-            modifier = Modifier.width(560.dp).heightIn(max = maxHeight),
+            modifier = Modifier.widthIn(max = maxWidth).width(560.dp).heightIn(max = maxHeight),
             shape = RoundedCornerShape(radii.dialog),
             color = colors.panel,
         ) {
@@ -100,10 +95,13 @@ fun McpActivityLogDialog(
                             "The most recent tool calls this session that reached the policy engine, " +
                                 "up to the last 100 - which plugin, what was decided, and how it turned " +
                                 "out. A call to an unregistered, unpermitted or kill-switch-disabled " +
-                                "tool never reaches this list. Older entries roll off here; they may " +
-                                "still be in the rotated $ledgerPath (the active file plus up to 5 " +
-                                "backups) on a best-effort basis - a write failure there is logged, not " +
-                                "retried.",
+                                "tool never reaches this list. Older entries roll off here." +
+                                if (ledgerPath != null) {
+                                    " They may still be in $ledgerPath (active file plus up to 5 backups), " +
+                                        "on a best-effort basis. Write failures are logged, not retried."
+                                } else {
+                                    " Disk persistence is not configured for this ledger."
+                                },
                         fontSize = 12.sp,
                         color = colors.textSecondary,
                     )
@@ -167,9 +165,6 @@ fun McpActivityLogDialog(
         }
     }
 }
-
-/** Matches [ai.rever.boss.mcp.McpToolRegistryImpl.ledger]'s own file name. */
-private const val MCP_LEDGER_FILE_NAME = "mcp-calls.jsonl"
 
 @Composable
 private fun McpOperationRow(
@@ -239,7 +234,7 @@ private fun McpOperationMetaRow(
     op: McpOperationRecord,
     colors: BossColorScheme,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             text = op.providerId,
             fontSize = 11.sp,
@@ -250,14 +245,12 @@ private fun McpOperationMetaRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 160.dp),
         )
-        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = op.policyApplied.name,
             fontSize = 10.sp,
             fontWeight = FontWeight.Medium,
             color = if (op.policyApplied == McpPolicyAction.DENY) colors.alert else colors.textSecondary,
         )
-        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = op.approvalDisposition.readable(),
             fontSize = 10.sp,
@@ -290,7 +283,7 @@ internal enum class McpUnsuccessfulCategory(
     DENIED("denied"),
     CANCELLED("cancelled"),
 
-    /** The tool never ran - a host disk fault withheld it, not a fault in the tool itself. */
+    /** The tool never ran because the host could not obtain or persist approval. */
     WITHHELD("withheld"),
 
     /** Everything else: the tool (or the host executing it) genuinely failed. */
@@ -323,11 +316,12 @@ internal val McpApprovalDisposition.unsuccessfulCategory: McpUnsuccessfulCategor
             McpApprovalDisposition.CANCELLED,
             McpApprovalDisposition.CANCELLED_AWAITING_APPROVAL,
             McpApprovalDisposition.CANCELLED_IN_FLIGHT,
-            McpApprovalDisposition.QUEUE_FULL,
             McpApprovalDisposition.TIMEOUT,
             -> McpUnsuccessfulCategory.CANCELLED
 
-            McpApprovalDisposition.POLICY_PERSIST_FAILED -> McpUnsuccessfulCategory.WITHHELD
+            McpApprovalDisposition.QUEUE_FULL,
+            McpApprovalDisposition.POLICY_PERSIST_FAILED,
+            -> McpUnsuccessfulCategory.WITHHELD
 
             McpApprovalDisposition.AUTO_ALLOWED,
             McpApprovalDisposition.APPROVED_ONCE,

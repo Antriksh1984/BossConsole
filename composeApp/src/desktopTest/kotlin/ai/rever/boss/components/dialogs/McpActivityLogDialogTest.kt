@@ -15,6 +15,11 @@ import kotlin.test.assertEquals
  */
 class McpActivityLogDialogTest {
     @Test
+    fun `queue overflow withholds a call without an operator cancellation`() {
+        assertEquals(McpUnsuccessfulCategory.WITHHELD, McpApprovalDisposition.QUEUE_FULL.unsuccessfulCategory)
+    }
+
+    @Test
     fun `every denial disposition classifies as denied`() {
         listOf(
             McpApprovalDisposition.DENIED_BY_OPERATOR,
@@ -31,7 +36,6 @@ class McpActivityLogDialogTest {
             McpApprovalDisposition.CANCELLED,
             McpApprovalDisposition.CANCELLED_AWAITING_APPROVAL,
             McpApprovalDisposition.CANCELLED_IN_FLIGHT,
-            McpApprovalDisposition.QUEUE_FULL,
             McpApprovalDisposition.TIMEOUT,
         ).forEach { disposition ->
             assertEquals(McpUnsuccessfulCategory.CANCELLED, disposition.unsuccessfulCategory, disposition.name)

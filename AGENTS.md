@@ -2094,8 +2094,7 @@ tool call is refused before that, so this is not a view over every MCP invocatio
 Retention is described as finite and best-effort (the active ledger file plus up to 5 rotated
 backups, and a write failure there is logged rather than retried), not a guarantee older calls
 are still on disk. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
-cancelled, withheld (a host disk fault that stopped the call from ever running, distinct from the
-tool itself failing) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
+cancelled, withheld (approval queue overflow or a host disk fault that stopped the call from running) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
 than a `setOf`-based membership check, so a disposition the enum grows later is a compile error
 here rather than silently counted as a tool fault.
 
@@ -2110,3 +2109,8 @@ effort, not a guarantee for secrets under arbitrary keys") is acceptable for an 
 dialog and not for a cross-plugin observation channel. Until that move happens, keeping this host
 UI is also the stronger guarantee for a second reason: a governance viewer that can be disabled or
 uninstalled by the plugins it governs is weaker than one that ships with the host.
+
+The idle activity entry appears only while MCP tools are exposed (existing history remains reachable).
+The viewer uses the ledger instance's actual optional persistence path. Its tooltip follows the host
+heavyweight overlay route. Width and height follow the originating window, with a fixed-cap fallback
+while window metadata is not yet measured; Close stays outside the scrolling body.
