@@ -302,7 +302,9 @@ private fun emptyRulesMessage(noSavedRules: Boolean): String =
     if (noSavedRules) "No saved rules. Default policies and session trust still apply." else "No matching saved rules."
 
 private fun McpToolIdentity.matchesPolicyQuery(query: String): Boolean =
-    toolName.contains(query.trim(), ignoreCase = true) || providerId.contains(query.trim(), ignoreCase = true)
+    toolName.contains(query.trim(), ignoreCase = true) ||
+        providerId.contains(query.trim(), ignoreCase = true) ||
+        description.contains(query.trim(), ignoreCase = true)
 
 @Composable
 private fun FilteredPolicyCandidates(
@@ -337,6 +339,7 @@ data class McpToolIdentity(
     val toolName: String,
     val providerId: String,
     val expectedRevocation: Long,
+    val description: String = "",
 )
 
 /**
@@ -418,13 +421,19 @@ private fun ProactivePolicyRow(
         color = colors.textSecondary.copy(alpha = 0.035f),
         border = BorderStroke(1.dp, colors.textSecondary.copy(alpha = 0.14f)),
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = tool.toolName,
                 fontSize = 14.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.SemiBold,
                 color = colors.textPrimary,
+            )
+            Text(
+                text = tool.description.ifBlank { "No description provided by this tool." },
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                color = colors.textSecondary,
             )
             Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 PolicyChoice("Allow", selected == McpPolicyAction.ALLOW, { onSelect(McpPolicyAction.ALLOW) }, colors)
@@ -468,7 +477,7 @@ private fun PolicyChoice(
                     if (selected) colors.signal.copy(alpha = 0.10f) else colors.textSecondary.copy(alpha = 0.04f),
                     RoundedCornerShape(8.dp),
                 ).selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+                .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {

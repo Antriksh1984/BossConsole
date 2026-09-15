@@ -123,6 +123,27 @@ class McpProactivePolicyDialogTest {
         rule.runOnIdle { assertTrue(closed) }
     }
 
+    @Test fun `long descriptions remain readable without changing a policy`() {
+        val description = "Edit the current document using an AI instruction. ".repeat(6)
+        var writes = 0
+        show {
+            McpPolicyManagerDialog(
+                emptyMap(),
+                listOf(McpToolIdentity("ai_compose", "editor-tab", 0, description)),
+                { true },
+                { _, _ ->
+                    writes++
+                    McpProactivePolicyOutcome.Saved
+                },
+                {},
+                {},
+            )
+        }
+        rule.onNodeWithText(description).performScrollTo().assertExists()
+        closeIsInsideWindow()
+        rule.runOnIdle { assertEquals(0, writes) }
+    }
+
     @Test fun `replacing a candidate invalidates the armed confirmation in light theme`() {
         val candidate = mutableStateOf(McpToolIdentity("tool", "provider", 0))
         var writes = 0

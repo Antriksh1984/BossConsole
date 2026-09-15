@@ -440,7 +440,12 @@ internal fun mcpProactivePolicyCandidates(
         .filter { it.definition.name !in rules }
         .filter { it.definition.name !in disabledToolNames }
         .map {
-            McpToolIdentity(it.definition.name, it.providerId, revocationVersion(it.definition.name, it.providerId))
+            McpToolIdentity(
+                it.definition.name,
+                it.providerId,
+                revocationVersion(it.definition.name, it.providerId),
+                it.definition.description,
+            )
         }.sortedBy { it.toolName }
         .toList()
 
