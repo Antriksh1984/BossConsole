@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -29,6 +28,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,9 +63,15 @@ fun McpActivityLogDialog(
     totalErrors: Long,
     onDismiss: () -> Unit,
 ) {
+    val windowHeight =
+        with(LocalDensity.current) {
+            LocalWindowInfo.current.containerSize.height
+                .toDp()
+        }
+    val maxHeight = (windowHeight - 32.dp).coerceAtLeast(1.dp)
     val colors = BossTheme.colors
     val radii = BossTheme.radius
-    val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val timeFormat = remember { SimpleDateFormat("MMM d HH:mm:ss", Locale.getDefault()) }
     // Resolved rather than hardcoded: BOSS_DATA_DIR can redirect BossDirectories.rootDir, and a
     // literal ~/.boss/mcp-calls.jsonl in user-visible copy would send an operator to a path that
     // does not exist on such a machine.
@@ -75,79 +82,78 @@ fun McpActivityLogDialog(
         properties = DialogProperties(),
     ) {
         Surface(
-            modifier = Modifier.width(560.dp).wrapContentHeight(),
+            modifier = Modifier.width(560.dp).heightIn(max = maxHeight),
             shape = RoundedCornerShape(radii.dialog),
             color = colors.panel,
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
-                Text(
-                    text = "MCP Activity Log",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.textPrimary,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text =
-                        "The most recent tool calls this session that reached the policy engine, " +
-                            "up to the last 100 - which plugin, what was decided, and how it turned " +
-                            "out. A call to an unregistered, unpermitted or kill-switch-disabled " +
-                            "tool never reaches this list. Older entries roll off here; they may " +
-                            "still be in the rotated $ledgerPath (the active file plus up to 5 " +
-                            "backups) on a best-effort basis - a write failure there is logged, not " +
-                            "retried.",
-                    fontSize = 12.sp,
-                    color = colors.textSecondary,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text =
-                        buildString {
-                            append("$totalCalls call")
-                            if (totalCalls != 1L) append("s")
-                            append(" total")
-                            // "Unsuccessful," not "errors": totalErrors also counts an operator's
-                            // own Deny and a cancelled approval, which are governance working as
-                            // designed, not tool faults - see the per-call breakdown below for
-                            // which kind actually happened (review on #636).
-                            if (totalErrors > 0) {
-                                append(", $totalErrors unsuccessful")
-                            }
-                        },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = colors.textSecondary,
-                )
-                val unsuccessfulBreakdown = remember(operations) { operations.unsuccessfulBreakdown() }
-                if (unsuccessfulBreakdown.isNotEmpty()) {
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     Text(
-                        text = "In the list below: " + unsuccessfulBreakdown.joinToString(", "),
-                        fontSize = 11.sp,
+                        text = "MCP Activity Log",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text =
+                            "The most recent tool calls this session that reached the policy engine, " +
+                                "up to the last 100 - which plugin, what was decided, and how it turned " +
+                                "out. A call to an unregistered, unpermitted or kill-switch-disabled " +
+                                "tool never reaches this list. Older entries roll off here; they may " +
+                                "still be in the rotated $ledgerPath (the active file plus up to 5 " +
+                                "backups) on a best-effort basis - a write failure there is logged, not " +
+                                "retried.",
+                        fontSize = 12.sp,
                         color = colors.textSecondary,
                     )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text =
+                            buildString {
+                                append("$totalCalls call")
+                                if (totalCalls != 1L) append("s")
+                                append(" total")
+                                // "Unsuccessful," not "errors": totalErrors also counts an operator's
+                                // own Deny and a cancelled approval, which are governance working as
+                                // designed, not tool faults - see the per-call breakdown below for
+                                // which kind actually happened (review on #636).
+                                if (totalErrors > 0) {
+                                    append(", $totalErrors unsuccessful")
+                                }
+                            },
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.textSecondary,
+                    )
+                    val unsuccessfulBreakdown = remember(operations) { operations.unsuccessfulBreakdown() }
+                    if (unsuccessfulBreakdown.isNotEmpty()) {
+                        Text(
+                            text = "In the list below: " + unsuccessfulBreakdown.joinToString(", "),
+                            fontSize = 11.sp,
+                            color = colors.textSecondary,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
 
-                if (operations.isEmpty()) {
-                    Text(
-                        text = "No MCP tool calls recorded yet this session.",
-                        fontSize = 13.sp,
-                        color = colors.textSecondary,
-                    )
-                } else {
-                    Column(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 420.dp)
-                                .verticalScroll(rememberScrollState()),
-                    ) {
-                        operations.forEach { op ->
-                            McpOperationRow(op, timeFormat, colors)
+                    if (operations.isEmpty()) {
+                        Text(
+                            text = "No MCP tool calls recorded yet this session.",
+                            fontSize = 13.sp,
+                            color = colors.textSecondary,
+                        )
+                    } else {
+                        Column(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth(),
+                        ) {
+                            operations.forEach { op ->
+                                McpOperationRow(op, timeFormat, colors)
+                            }
                         }
                     }
                 }
-
                 Spacer(modifier = Modifier.height(16.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     Button(
