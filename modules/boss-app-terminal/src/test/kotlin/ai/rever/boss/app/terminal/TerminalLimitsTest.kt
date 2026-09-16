@@ -1,5 +1,11 @@
 package ai.rever.boss.app.terminal
 
+import ai.rever.boss.ipc.BossIpcClient
+import ai.rever.boss.ipc.BossIpcServer
+import ai.rever.boss.ipc.auth.IpcClientCredentials
+import ai.rever.boss.ipc.auth.IpcTlsIdentity
+import ai.rever.boss.ipc.auth.ProcessIdentityInterceptor
+import ai.rever.boss.ipc.auth.ProcessTokenRegistry
 import ai.rever.boss.ipc.proto.Empty
 import ai.rever.boss.ipc.proto.services.CloseSessionRequest
 import ai.rever.boss.ipc.proto.services.CreateSessionRequest
@@ -8,10 +14,10 @@ import ai.rever.boss.ipc.proto.services.SendInputRequest
 import ai.rever.boss.ipc.proto.services.StreamOutputRequest
 import ai.rever.boss.ipc.proto.services.TerminalServiceGrpcKt
 import com.google.protobuf.ByteString
-import io.grpc.ManagedChannelBuilder
-import io.grpc.ServerBuilder
+import io.grpc.Context
 import io.grpc.Status
 import io.grpc.StatusException
+import io.grpc.kotlin.GrpcContextElement
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -51,23 +57,26 @@ class TerminalLimitsTest {
 
     private val root = Files.createTempDirectory("terminal-limits-")
     private val service = TerminalServiceImpl(activeLimit = 1, historyLimit = 2)
-    private val server =
-        ServerBuilder
-            .forPort(0)
-            .addService(service)
-            .build()
-            .start()
-    private val channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.port).usePlaintext().build()
-    private val stub = TerminalServiceGrpcKt.TerminalServiceCoroutineStub(channel)
+    private val registry = ProcessTokenRegistry()
+    private val tls = IpcTlsIdentity.create()
+    private val token = registry.issue("limits")
+    private val server = BossIpcServer("tcp://127.0.0.1:0", registry, tls).addService(service).start()
+    private val client =
+        BossIpcClient("tcp://127.0.0.1:${server.port}", IpcClientCredentials(tls.certificateBase64, token))
+    private val stub = TerminalServiceGrpcKt.TerminalServiceCoroutineStub(client.channel)
+    private val callerContext =
+        GrpcContextElement(
+            Context.ROOT.withValue(ProcessIdentityInterceptor.CURRENT_PRINCIPAL, { registry.principalFor(token) }),
+        )
 
     @AfterTest
     fun cleanup() =
         runBlocking {
-            service.listSessions(Empty.getDefaultInstance()).sessionsList.forEach { session ->
-                service.closeSession(CloseSessionRequest.newBuilder().setSessionId(session.sessionId).build())
+            stub.listSessions(Empty.getDefaultInstance()).sessionsList.forEach { session ->
+                stub.closeSession(CloseSessionRequest.newBuilder().setSessionId(session.sessionId).build())
             }
-            channel.shutdownNow()
-            server.shutdownNow()
+            client.shutdown(0)
+            server.stop()
             service.close()
             root.toFile().deleteRecursively()
             Unit
@@ -222,12 +231,12 @@ class TerminalLimitsTest {
         runBlocking {
             withTimeout(15_000) {
                 val dispatcher = PausedDispatcher()
-                val scope = CoroutineScope(SupervisorJob() + dispatcher)
+                val scope = CoroutineScope(SupervisorJob() + dispatcher + callerContext)
                 val creation = scope.async { service.createSession(request("wait")) }
                 dispatcher.next().run()
                 val returning = dispatcher.next()
                 val unclaimed =
-                    service
+                    stub
                         .listSessions(Empty.getDefaultInstance())
                         .sessionsList
                         .single()

@@ -1,5 +1,7 @@
 package ai.rever.boss.app.terminal
 
+import ai.rever.boss.ipc.auth.IpcCall
+import ai.rever.boss.ipc.auth.IpcEnvironment
 import ai.rever.boss.ipc.proto.services.CreateSessionRequest
 import ai.rever.boss.ipc.proto.services.TerminalOutputChunk
 import com.google.protobuf.ByteString
@@ -9,6 +11,7 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.locks.ReentrantLock
 
+@Suppress("LongParameterList") // Owner identity stays immutable alongside the process and terminal dimensions.
 internal class TerminalSession(
     val id: String,
     val workingDirectory: String,
@@ -16,6 +19,7 @@ internal class TerminalSession(
     val process: Process,
     @Volatile var cols: Int,
     @Volatile var rows: Int,
+    val ownerInstance: String = "",
 ) {
     val createdAt = System.currentTimeMillis()
     val output = TerminalOutputBuffer()
@@ -130,7 +134,10 @@ internal class TerminalSession(
             )
         }
 
-        fun launch(request: CreateSessionRequest): TerminalSession {
+        fun launch(
+            request: CreateSessionRequest,
+            ownerInstance: String,
+        ): TerminalSession {
             validateLaunchInput(request)
             val directory = request.workingDirectory.ifBlank { System.getProperty("user.home") }
             val command =
@@ -152,9 +159,18 @@ internal class TerminalSession(
                 put("LINES", rows.toString())
                 putAll(request.environmentMap)
                 // Strip after overrides so a launch request cannot reintroduce the parent's authority.
-                keys.filter { it.equals("BOSS_PROCESS_TOKEN", ignoreCase = true) }.forEach { remove(it) }
+                IpcEnvironment.removeCredentials(this)
             }
-            return TerminalSession(UUID.randomUUID().toString(), directory, command, builder.start(), cols, rows)
+            IpcCall.requireOwner(ownerInstance)
+            return TerminalSession(
+                UUID.randomUUID().toString(),
+                directory,
+                command,
+                builder.start(),
+                cols,
+                rows,
+                ownerInstance,
+            )
         }
     }
 }

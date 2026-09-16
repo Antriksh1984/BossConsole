@@ -1,5 +1,7 @@
 package ai.rever.boss.app.terminal
 
+import ai.rever.boss.ipc.auth.IpcCall
+import ai.rever.boss.ipc.auth.ProcessAuthority
 import ai.rever.boss.ipc.proto.Empty
 import ai.rever.boss.ipc.proto.services.*
 import io.grpc.Status
@@ -7,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
@@ -32,6 +33,7 @@ class TerminalServiceImpl(
     }
 
     override suspend fun createSession(request: CreateSessionRequest): CreateSessionResponse {
+        val ownerInstance = IpcCall.current().instanceId
         var session: TerminalSession? = null
         var admitted = false
         var pumping = false
@@ -49,7 +51,7 @@ class TerminalServiceImpl(
                     synchronized(lock) {
                         reserveSlot()
                         admitted = true
-                        val launched = TerminalSession.launch(request)
+                        val launched = TerminalSession.launch(request, ownerInstance)
                         session = launched
                         retain(launched)
                         launched.startPump { activeSlots.release() }
@@ -142,7 +144,11 @@ class TerminalServiceImpl(
                     ).asRuntimeException()
             }
             try {
-                emitAll(session(request.sessionId).output.stream())
+                val owned = session(request.sessionId)
+                owned.output.stream().collect { chunk ->
+                    IpcCall.requireOwner(owned.ownerInstance)
+                    emit(chunk)
+                }
             } finally {
                 streamSlots.release()
             }
@@ -166,7 +172,13 @@ class TerminalServiceImpl(
     }
 
     override suspend fun listSessions(request: Empty): ListSessionsResponse {
-        val snapshot = synchronized(lock) { sessions.values.toList() }
+        val caller = IpcCall.current()
+        val snapshot =
+            synchronized(lock) {
+                sessions.values.filter {
+                    caller.authority == ProcessAuthority.HOST || it.ownerInstance == caller.instanceId
+                }
+            }
         return ListSessionsResponse
             .newBuilder()
             .addAllSessions(
@@ -183,7 +195,12 @@ class TerminalServiceImpl(
             ).build()
     }
 
-    private fun session(id: String): TerminalSession =
-        synchronized(lock) { sessions[id] }
-            ?: throw Status.NOT_FOUND.withDescription("Terminal session not found").asRuntimeException()
+    private fun session(id: String): TerminalSession {
+        IpcCall.current()
+        val found =
+            synchronized(lock) { sessions[id] }
+                ?: throw Status.NOT_FOUND.withDescription("Terminal session not found").asRuntimeException()
+        IpcCall.requireOwner(found.ownerInstance)
+        return found
+    }
 }

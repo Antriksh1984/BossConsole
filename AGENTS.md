@@ -2027,6 +2027,8 @@ workspace by selecting the tools you need." Tools install app-wide, not into a S
 
 ## Documentation
 
+- [Authenticated IPC rollout](docs/authenticated-ipc-rollout.md): paired runtime release, ownership, and credential lifetime.
+
 - [MCP for agent-less operators](docs/mcp-agentless-operators.md) - Toolbox kill-switches and attach path
 
 - [Core Subsystems](docs/SUBSYSTEMS.md) - Auth, UI, keyboard shortcuts, threading, default applications, runner, BossTerm
