@@ -33,19 +33,9 @@ import java.nio.file.StandardCopyOption
 class FileSystemServiceImpl : FileSystemServiceGrpcKt.FileSystemServiceCoroutineImplBase() {
     private val logger = LoggerFactory.getLogger(FileSystemServiceImpl::class.java)
 
-    /** Paths that must not be accessed via IPC — prevents privilege-escalation via path injection. */
-    private val BLOCKED_PATH_PREFIXES = listOf("/etc", "/sys", "/proc")
+    private val pathPolicy = FileSystemPathPolicy()
 
-    /**
-     * Validates that [path] does not traverse outside its intended root and does not
-     * target sensitive system directories. Throws [IllegalArgumentException] on violation.
-     */
-    private fun validatePath(path: String) {
-        require(!path.contains("..")) { "Path traversal sequences ('..') are not allowed: $path" }
-        BLOCKED_PATH_PREFIXES.forEach { prefix ->
-            require(!path.startsWith(prefix)) { "Access to system path '$prefix' is not allowed: $path" }
-        }
-    }
+    private fun validatePath(path: String) = pathPolicy.validate(path)
 
     override suspend fun scanDirectory(request: ScanDirectoryRequest): ScanDirectoryResponse =
         withContext(Dispatchers.IO) {
@@ -177,10 +167,13 @@ class FileSystemServiceImpl : FileSystemServiceGrpcKt.FileSystemServiceCoroutine
         withContext(Dispatchers.IO) {
             IpcCall.requireHost()
             logger.info("deleteFile: path={}, recursive={}", request.path, request.recursive)
-            validatePath(request.path)
+            pathPolicy.validate(request.path, followFinalLink = false)
             val file = File(request.path)
-            if (request.recursive && file.isDirectory) {
-                file.deleteRecursively()
+            if (request.recursive && Files.isDirectory(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                // Never traverse directory symlinks during recursive deletion.
+                Files.walk(file.toPath()).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+                }
             } else if (!request.recursive) {
                 try {
                     Files.deleteIfExists(file.toPath())
@@ -252,8 +245,8 @@ class FileSystemServiceImpl : FileSystemServiceGrpcKt.FileSystemServiceCoroutine
         withContext(Dispatchers.IO) {
             IpcCall.requireHost()
             logger.info("renameFile: from={}, to={}", request.sourcePath, request.destinationPath)
-            validatePath(request.sourcePath)
-            validatePath(request.destinationPath)
+            pathPolicy.validate(request.sourcePath, followFinalLink = false)
+            pathPolicy.validate(request.destinationPath, followFinalLink = false)
             val destinationExists = "Destination already exists: ${request.destinationPath}"
             val source = Paths.get(request.sourcePath)
             val dest = Paths.get(request.destinationPath)

@@ -162,8 +162,8 @@ class FileSystemServiceRenameTest {
                 rename(requestedSource, requestedDestination, overwrite = true)
             }
 
-        // The existing path validator throws IllegalArgumentException, mapped by gRPC to UNKNOWN.
-        assertEquals(Status.Code.UNKNOWN, failure.status.code)
+        // Invalid paths retain a descriptive status across the authenticated transport.
+        assertEquals(Status.Code.INVALID_ARGUMENT, failure.status.code)
         assertEquals("content", source.readText(), "the source must survive a refused rename")
         assertFalse(dest.exists())
     }

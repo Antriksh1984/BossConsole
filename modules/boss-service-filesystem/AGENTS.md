@@ -19,3 +19,9 @@ do not remove the host guard just to make a plugin call succeed.
 Run focused validation with the workspace shared build lock:
 `./gradlew :boss-service-filesystem:test :boss-service-filesystem:ktlintCheck :boss-service-filesystem:detekt`.
 Do not launch the application for these tests.
+
+System-path validation resolves existing ancestors before read/create/write or watch access,
+including missing destinations below symlinked directories. Rename/delete validate the
+parent but operate on the final directory entry without following its symlink; recursive
+delete must not traverse symlinked directories. Invalid paths return INVALID_ARGUMENT.
+This host-only guard is not a sandbox against concurrent filesystem mutation.
