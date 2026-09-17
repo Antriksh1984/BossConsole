@@ -465,6 +465,96 @@ class WorkspaceMcpToolProviderTest {
             assertTrue(fileResult.text.contains("security check failed"))
         }
 
+    /**
+     * BossConsole#856: a `workspaceId` ending in `.json` used to pass straight through to
+     * `fileManager.loadWorkspace`, and the raw-id fallback resolved the same unsanitized string
+     * a second time - both against `Paths.get(workspaceDirectory, workspaceId)`, so an id
+     * carrying `../` segments could load a `LayoutWorkspace` from anywhere the process can read.
+     *
+     * [outsideSecretWorkspace] plants a real, valid workspace file OUTSIDE this test's workspace
+     * directory and returns the traversal id that reaches it under the OLD code - proving the fix
+     * closes the hole rather than merely asserting on a string a stricter validator might also
+     * produce for an unrelated reason.
+     */
+    @Test
+    fun `open_workspace refuses a workspaceId that traverses outside the workspace directory`() =
+        runBlocking {
+            val traversalId = outsideSecretWorkspace()
+            val core = createTestCore()
+
+            val result = core.invoke("open_workspace", """{"workspaceId":"$traversalId"}""")
+
+            assertTrue(result.isError, result.text)
+            assertTrue(result.text.contains("not found"), result.text)
+        }
+
+    /**
+     * BossConsole#862: the destructive sibling of #856. The `workspace-disposable-` prefix guard
+     * only constrains the id's PREFIX, so a disposable id whose TAIL carries `../` segments and
+     * ends in `.json` still reached the raw-passthrough branch and could delete a file outside
+     * the workspace directory. The load-bearing assertion is that the outside file still exists
+     * afterward, not merely that the tool reports an error.
+     */
+    @Test
+    fun `close_workspace refuses to delete a file outside the workspace directory`() =
+        runBlocking {
+            val outsideDir = Files.createTempDirectory("workspace-mcp-outside").toFile()
+            tempDirs.add(outsideDir)
+            val outsideManager = WorkspaceFileManager(directoryOverride = outsideDir.absolutePath)
+            val secretFileName = WorkspaceFileManagerCommon.fileNameForId("secret")
+            outsideManager.saveWorkspace(
+                LayoutWorkspace(
+                    id = "secret",
+                    name = "Secret",
+                    description = "not yours",
+                    layout = SplitConfig.SinglePanel(PanelConfig(id = "main", tabs = emptyList())),
+                ),
+            )
+            val outsideFile = File(outsideDir, secretFileName)
+            assertTrue(outsideFile.exists(), "the file the traversal id targets must exist before the attempt")
+
+            val relative =
+                workspaceDir
+                    .toPath()
+                    .relativize(outsideDir.toPath())
+                    .toString()
+                    .replace('\\', '/')
+            val traversalId = "${WorkspaceMcpToolProvider.DISPOSABLE_ID_PREFIX}$relative/$secretFileName"
+            val core = createTestCore()
+
+            val result = core.invoke("close_workspace", """{"workspaceId":"$traversalId"}""")
+
+            assertTrue(result.isError, result.text)
+            assertTrue(outsideFile.exists(), "the file outside the workspace directory must survive the attempt")
+        }
+
+    /**
+     * Plants a real, deserializable workspace file one level outside [workspaceDir] and returns
+     * the `workspaceId` that reached it under the pre-#856 code: `<relative traversal>/<its
+     * sanitized filename>`, which ends in `.json` and so took the old raw-passthrough branch.
+     */
+    private suspend fun outsideSecretWorkspace(): String {
+        val outsideDir = Files.createTempDirectory("workspace-mcp-outside").toFile()
+        tempDirs.add(outsideDir)
+        val outsideManager = WorkspaceFileManager(directoryOverride = outsideDir.absolutePath)
+        val secretFileName = WorkspaceFileManagerCommon.fileNameForId("secret")
+        outsideManager.saveWorkspace(
+            LayoutWorkspace(
+                id = "secret",
+                name = "Secret",
+                description = "not yours",
+                layout = SplitConfig.SinglePanel(PanelConfig(id = "main", tabs = emptyList())),
+            ),
+        )
+        val relative =
+            workspaceDir
+                .toPath()
+                .relativize(outsideDir.toPath())
+                .toString()
+                .replace('\\', '/')
+        return "$relative/$secretFileName"
+    }
+
     @Test
     fun `open_terminal opens exactly one terminal tab in a real window`() =
         runBlocking {

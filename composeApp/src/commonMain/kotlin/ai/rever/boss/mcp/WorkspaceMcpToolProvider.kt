@@ -469,13 +469,14 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             // Check saved workspaces
             if (workspace == null) {
                 val fileManager = getFileManager()
-                val fileName =
-                    if (workspaceId.endsWith(".json")) {
-                        workspaceId
-                    } else {
-                        WorkspaceFileManagerCommon.fileNameForId(workspaceId)
-                    }
-                workspace = fileManager.loadWorkspace(fileName) ?: fileManager.loadWorkspace(workspaceId)
+                // BossConsole#856: fileNameForId unconditionally, and no raw-id fallback. The old
+                // `.json`-suffix branch passed workspaceId through unsanitized, and the fallback
+                // resolved the raw id straight against the workspace directory - so an id carrying
+                // `../` segments could load a LayoutWorkspace from anywhere the process can read.
+                // list_workspaces reports bare ids and on-disk names are minted by this same
+                // function, so every legitimate id still maps to the file it always has.
+                val fileName = WorkspaceFileManagerCommon.fileNameForId(workspaceId.removeSuffix(".json"))
+                workspace = fileManager.loadWorkspace(fileName)
             }
         }
 
@@ -936,12 +937,12 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // substring): a user's saved Space whose name merely mentions "disposable" is not ours.
         var fileDeleted = false
         if (workspaceId.startsWith(DISPOSABLE_ID_PREFIX)) {
-            val fileName =
-                if (workspaceId.endsWith(".json")) {
-                    workspaceId
-                } else {
-                    WorkspaceFileManagerCommon.fileNameForId(workspaceId)
-                }
+            // BossConsole#862: the destructive sibling of #856. The prefix check above only
+            // constrains the id's PREFIX, so a `workspace-disposable-` id whose tail carries
+            // `../` segments still passed straight through in the `.json`-suffix branch and could
+            // delete a file outside the workspace directory. fileNameForId unconditionally, same
+            // fix shape as open_workspace.
+            val fileName = WorkspaceFileManagerCommon.fileNameForId(workspaceId.removeSuffix(".json"))
             fileDeleted = getFileManager().deleteWorkspace(fileName)
         }
 
