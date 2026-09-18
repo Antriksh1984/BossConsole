@@ -54,7 +54,7 @@ class HumanReportsTerminalSafetyTest {
 
     @Test
     fun `a tool list neutralises escape sequences in names, plugin ids and descriptions`() {
-        val json = toolsJson(tool("run$esc[2J", "plugin$esc]0;pwned${bel}", "desc$esc[31m red"))
+        val json = toolsJson(tool("run$esc[2J", "plugin$esc]0;pwned$bel", "desc$esc[31m red"))
 
         val text = formatHumanToolsList(json, filterQuery = null)
 
@@ -104,7 +104,7 @@ class HumanReportsTerminalSafetyTest {
                         buildJsonObject {
                             put("severity", "warn")
                             put("summary", "plugin evil$esc[2J failed")
-                            put("remedy", "reload$esc]0;pwned${bel}")
+                            put("remedy", "reload$esc]0;pwned$bel")
                         },
                     )
                 }
