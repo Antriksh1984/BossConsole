@@ -24,6 +24,12 @@ import kotlin.test.assertTrue
  * covered by the argument conventions `BossMcpCliTest` already exercises.
  */
 class McpLedgerCliTest {
+    private val esc = 27.toChar()
+    private val bel = 7.toChar()
+    private val csi = 0x9b.toChar()
+    private val del = 0x7f.toChar()
+    private val rlo = 0x202e.toChar()
+
     private val tempFiles = mutableListOf<File>()
 
     private fun createTempLedgerFile(): File {
@@ -332,7 +338,7 @@ class McpLedgerCliTest {
         val file = createTempLedgerFile()
         val ledger = McpOperationLedger(ledgerFile = file)
         val forgedRow = "2099-01-01T00:00:00Z  approved_tool  ALLOW/AUTO_ALLOWED       1ms  ok     hash 000000000000"
-        recordWithError(ledger, "read_file", "denied\n$forgedRow[2J]0;pwned")
+        recordWithError(ledger, "read_file", "denied\n$forgedRow$esc[2J$esc]0;pwned$bel")
 
         val text = okText(McpLedgerCli.tail(file.absolutePath, lines = 10, query = McpLedgerQuery(), json = false))
 
@@ -346,12 +352,12 @@ class McpLedgerCliTest {
     fun `tail neutralises control and direction-override characters in a tool name`() {
         val file = createTempLedgerFile()
         val ledger = McpOperationLedger(ledgerFile = file)
-        record(ledger, "safe[31m‮tool")
+        record(ledger, "safe$esc[31m${rlo}tool")
 
         val text = okText(McpLedgerCli.tail(file.absolutePath, lines = 10, query = McpLedgerQuery(), json = false))
 
         assertNoTerminalControl(text)
-        assertTrue(text.none { it == '‮' }, "a bidi override can visually reorder the tool name:\n$text")
+        assertTrue(text.none { it == rlo }, "a bidi override can visually reorder the tool name:\n$text")
     }
 
     @Test
@@ -360,10 +366,10 @@ class McpLedgerCliTest {
         assertEquals(ordinary, McpLedgerFormat.terminalSafe(ordinary))
 
         assertEquals("a\\nb\\tc\\r", McpLedgerFormat.terminalSafe("a\nb\tc\r"))
-        assertEquals("\\u001b[2J", McpLedgerFormat.terminalSafe("[2J"))
-        assertEquals("\\u009b31m", McpLedgerFormat.terminalSafe("31m"), "the C1 CSI is an ESC sequence in one byte")
-        assertEquals("\\u007f", McpLedgerFormat.terminalSafe(""))
-        assertEquals("\\u202e", McpLedgerFormat.terminalSafe("‮"))
+        assertEquals("\\u001b[2J", McpLedgerFormat.terminalSafe("$esc[2J"))
+        assertEquals("\\u009b31m", McpLedgerFormat.terminalSafe("${csi}31m"), "the C1 CSI is one-byte ESC[")
+        assertEquals("\\u007f", McpLedgerFormat.terminalSafe("$del"))
+        assertEquals("\\u202e", McpLedgerFormat.terminalSafe("$rlo"))
     }
 
     @Test
