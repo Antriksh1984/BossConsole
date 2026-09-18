@@ -102,7 +102,7 @@ class BossPluginInitCommand : CliktCommand(name = "init") {
                     }
                 echo(errPayload.toString())
             } else {
-                echo("Error: $errorMsg", err = true)
+                echo(formatErrorLine(errorMsg), err = true)
             }
             throw ProgramResult(1)
         }
@@ -138,7 +138,7 @@ class BossPluginValidateCommand : CliktCommand(name = "validate") {
             echo("Validating plugin at ${target.absolutePath}...")
             result.checks.forEach { check ->
                 val mark = if (check.passed) "[✓]" else "[✗]"
-                echo("$mark ${check.name}: ${check.message}")
+                echo(formatCheckLine(mark, check.name, check.message))
             }
             if (report.success) {
                 echo("\n[✓] Validation passed (${report.checksPassed}/${report.totalChecks} checks passed)")
@@ -148,7 +148,7 @@ class BossPluginValidateCommand : CliktCommand(name = "validate") {
                     "Validation failed with ${report.failures.size} errors at ${target.absolutePath}",
                 )
                 echo("\nValidation failed with ${report.failures.size} errors:", err = true)
-                report.failures.forEach { echo("  [✗] ${it.checkName}: ${it.message}", err = true) }
+                report.failures.forEach { echo(formatCheckLine("  [✗]", it.checkName, it.message), err = true) }
                 throw ProgramResult(1)
             }
         }
@@ -184,7 +184,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
                     }.toString(),
                 )
             } else {
-                echo("Error: $msg", err = true)
+                echo(formatErrorLine(msg), err = true)
             }
             throw ProgramResult(1)
         }
@@ -203,7 +203,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
                         }.toString(),
                     )
                 } else {
-                    echo("Error: $msg", err = true)
+                    echo(formatErrorLine(msg), err = true)
                 }
                 throw ProgramResult(1)
             }
@@ -219,7 +219,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
             } else {
                 echo("$errMsg:", err = true)
                 validation.checks.filter { !it.passed }.forEach {
-                    echo("  [✗] ${it.name}: ${it.message}", err = true)
+                    echo(formatCheckLine("  [✗]", it.name, it.message), err = true)
                 }
             }
             throw ProgramResult(1)
@@ -240,7 +240,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
                         }.toString(),
                     )
                 } else {
-                    echo("Error: $msg", err = true)
+                    echo(formatErrorLine(msg), err = true)
                 }
                 throw ProgramResult(1)
             }
@@ -261,7 +261,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
                     }.toString(),
                 )
             } else {
-                echo("Error: $msg", err = true)
+                echo(formatErrorLine(msg), err = true)
             }
             throw ProgramResult(1)
         }
@@ -302,7 +302,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
                     }.toString(),
                 )
             } else {
-                echo("Error: $msg", err = true)
+                echo(formatErrorLine(msg), err = true)
             }
             throw ProgramResult(1)
         }
@@ -387,3 +387,13 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
         }
     }
 }
+
+/** One line of `boss plugin` check output: a mark, the check's name, and its message. */
+internal fun formatCheckLine(
+    mark: String,
+    name: String,
+    message: String,
+): String = "$mark $name: $message"
+
+/** An `Error:` line of `boss plugin` output. */
+internal fun formatErrorLine(message: String?): String = "Error: $message"
