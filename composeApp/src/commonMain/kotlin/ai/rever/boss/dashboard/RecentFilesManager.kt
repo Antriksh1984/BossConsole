@@ -53,6 +53,7 @@ data class RecentFilesData(
  * The sibling [RecentBrowserPagesManager] had the same three defects and was fixed first; this
  * class is kept deliberately parallel to it so the two do not drift again.
  */
+@Suppress("TooManyFunctions")
 object RecentFilesManager {
     private const val MAX_FILES = 20
     private const val SAVE_DEBOUNCE_MS = 5000L // Debounce saves to max once per 5 seconds
@@ -299,6 +300,32 @@ object RecentFilesManager {
                 recentFilesLogger.warn(LogCategory.FILE, "Error saving recent files", error = e)
             }
         }
+
+    /**
+     * Flush a debounced save that is still pending, writing the recorded list immediately.
+     *
+     * The exit-path half of the debounce: quitting inside [SAVE_DEBOUNCE_MS] of the last
+     * mutation used to drop it, because the pending job died with the process - the window
+     * #795's own body called out as a separate bug. The timer is cancelled under
+     * [saveJobLock] (the same swap [scheduleSave] uses, so a save landing during the flush
+     * cannot install a job around it) and the write goes through [saveImmediately], which is
+     * fail-closed: a write error is logged, never thrown, so one unwritable file cannot take
+     * the rest of the exit steps down with it.
+     *
+     * A no-op when nothing is pending: a debounce that already fired has persisted the
+     * list, and rewriting recent-files.json regardless would churn the file on every quit
+     * for no reason.
+     */
+    suspend fun flushPendingSaves() {
+        val pending =
+            synchronized(saveJobLock) {
+                val active = saveJob?.isActive == true
+                saveJob?.cancel()
+                saveJob = null
+                active
+            }
+        if (pending) saveImmediately()
+    }
 
     /**
      * Record a file open event.
