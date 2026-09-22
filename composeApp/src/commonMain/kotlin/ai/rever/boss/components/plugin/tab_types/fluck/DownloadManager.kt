@@ -205,6 +205,14 @@ class DownloadManager {
     fun getDownload(id: String): DownloadItem? = _downloadsMap.value[id]
 
     /**
+     * Every tracked download, read live from the internal map rather than the [downloads] flow above,
+     * which is sampled every 150ms for UI display. A caller deciding whether a path may be opened or
+     * revealed needs the download the instant it is tracked and the instant it stops being tracked, not
+     * once the throttle catches up - the same reason [getDownload] already bypasses it for a single id.
+     */
+    fun allDownloads(): List<DownloadItem> = _downloadsMap.value.values.toList()
+
+    /**
      * Gets count of active downloads (downloading or queued).
      */
     fun getActiveCount(): Int = _downloadsMap.value.values.count { it.isActive }
