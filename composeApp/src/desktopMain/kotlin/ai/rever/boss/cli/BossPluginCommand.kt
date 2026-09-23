@@ -217,7 +217,10 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
             if (json) {
                 echo(launchpadJson.encodeToString(report))
             } else {
-                echo("$errMsg:", err = true)
+                // errMsg embeds a filename discovered inside the cloned plugin repo - ESC/CR/LF
+                // are legal in POSIX names, so this line goes through TerminalText like every
+                // other error path in this command.
+                echo(formatErrorLine("$errMsg:"), err = true)
                 validation.checks.filter { !it.passed }.forEach {
                     echo(formatCheckLine("  [✗]", it.name, it.message), err = true)
                 }

@@ -61,6 +61,19 @@ class PluginCommandTerminalSafetyTest {
     }
 
     @Test
+    fun `the invalid-plugin header neutralises a hostile discovered filename`() {
+        // The link command prints "Cannot link invalid plugin at <path>" where the filename
+        // was discovered inside the cloned plugin repo - attacker-controlled. The header must
+        // go through formatErrorLine like every other error path.
+        val hostile = "/tmp/x$esc[2J.jar"
+        val line = formatErrorLine("Cannot link invalid plugin at $hostile:")
+
+        assertNoTerminalControl(line)
+        assertEquals(1, line.lines().size, line)
+        assertTrue(line.startsWith("Error: Cannot link invalid plugin at "), line)
+    }
+
+    @Test
     fun `validating a hostile manifest cannot reach the terminal through the printed checks`() {
         val dir = pluginDirWithManifest("{ \"id\": \"evil$esc[2J\", not json $esc]0;pwned\nforged line")
 
